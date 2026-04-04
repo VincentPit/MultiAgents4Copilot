@@ -4,7 +4,7 @@
 
 import * as vscode from "vscode";
 import { AgentState, AgentMessage, ReviewVerdict, postAgentMessage } from "../graph/state";
-import { callModel, sysMsg, userMsg, assistantMsg, truncateMessages, safeBudget } from "./base";
+import { callModel, sysMsg, userMsg, assistantMsg, truncateMessages, safeBudget, capContext } from "./base";
 import { logger } from "../utils/logger";
 
 const MAX_REVIEWS = 3;
@@ -42,7 +42,7 @@ export async function reviewerNode(
   ];
 
   if (state.workspaceContext) {
-    messages.push(userMsg(`[WORKSPACE CONTEXT]\n${state.workspaceContext}`));
+    messages.push(userMsg(`[WORKSPACE CONTEXT]\n${capContext(state.workspaceContext, 2000)}`));
   }
 
   for (const msg of state.messages) {

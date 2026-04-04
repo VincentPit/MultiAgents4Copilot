@@ -4,7 +4,7 @@
 
 import * as vscode from "vscode";
 import { AgentState, AgentMessage, postAgentMessage, getMessagesFor } from "../graph/state";
-import { callModel, sysMsg, userMsg, assistantMsg, truncateMessages, safeBudget } from "./base";
+import { callModel, sysMsg, userMsg, assistantMsg, truncateMessages, safeBudget, capContext } from "./base";
 import { logger } from "../utils/logger";
 
 const SYSTEM_PROMPT = `You are the Coder agent — an expert software engineer.
@@ -35,7 +35,7 @@ export async function coderNode(
 
   // Inject workspace context so coder can see the actual files
   if (state.workspaceContext) {
-    systemPrompt += `\n\n${state.workspaceContext}`;
+    systemPrompt += `\n\n${capContext(state.workspaceContext, 2000)}`;
   }
 
   if (state.plan.length > 0) {

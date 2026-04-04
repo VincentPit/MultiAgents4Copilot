@@ -153,28 +153,44 @@ export function formatSnapshotForLLM(snapshot: WorkspaceSnapshot): string {
   }
 
   if (snapshot.fileTree) {
-    parts.push(`\n### Project Structure\n\`\`\`\n${snapshot.fileTree}\n\`\`\``);
+    // Cap file tree to 1000 chars
+    const tree = snapshot.fileTree.length > 1000
+      ? snapshot.fileTree.slice(0, 1000) + "\n  … (truncated)"
+      : snapshot.fileTree;
+    parts.push(`\n### Project Structure\n\`\`\`\n${tree}\n\`\`\``);
   }
 
+  // Only include the first project metadata file (usually package.json)
   if (snapshot.projectMeta.length > 0) {
-    for (const meta of snapshot.projectMeta) {
-      parts.push(`\n### ${meta.path}\n\`\`\`\n${meta.content}\n\`\`\``);
-    }
+    const meta = snapshot.projectMeta[0];
+    const content = meta.content.length > 800
+      ? meta.content.slice(0, 800) + "\n… (truncated)"
+      : meta.content;
+    parts.push(`\n### ${meta.path}\n\`\`\`\n${content}\n\`\`\``);
   }
 
   if (snapshot.openFiles.length > 0) {
-    const list = snapshot.openFiles.map(f => `- ${f.path} (${f.language})`).join("\n");
+    const list = snapshot.openFiles.slice(0, 8).map(f => `- ${f.path} (${f.language})`).join("\n");
     parts.push(`\n### Open files\n${list}`);
   }
 
   if (snapshot.activeFile) {
+    // Cap active file content to keep total small
+    const content = snapshot.activeFile.content.length > 1500
+      ? snapshot.activeFile.content.slice(0, 1500) + "\n// … (truncated)"
+      : snapshot.activeFile.content;
     parts.push(
       `\n### Active file: ${snapshot.activeFile.path} (${snapshot.activeFile.language})\n` +
-      `\`\`\`${snapshot.activeFile.language}\n${snapshot.activeFile.content}\n\`\`\``
+      `\`\`\`${snapshot.activeFile.language}\n${content}\n\`\`\``
     );
   }
 
-  return parts.join("\n");
+  // Hard-cap total output to 4000 chars (~1000 tokens)
+  const result = parts.join("\n");
+  if (result.length > 4000) {
+    return result.slice(0, 4000) + "\n[… workspace context truncated]";
+  }
+  return result;
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────

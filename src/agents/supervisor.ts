@@ -5,7 +5,7 @@
 
 import * as vscode from "vscode";
 import { AgentState } from "../graph/state";
-import { callModel, sysMsg, userMsg, assistantMsg, truncateMessages, safeBudget } from "./base";
+import { callModel, sysMsg, userMsg, assistantMsg, truncateMessages, safeBudget, capContext } from "./base";
 import { logger } from "../utils/logger";
 
 const SYSTEM_PROMPT = `You are the Supervisor of a multi-agent coding team.
@@ -44,7 +44,7 @@ export async function supervisorNode(
 
   // Inject workspace context so supervisor knows about the codebase
   if (state.workspaceContext) {
-    messages.push(userMsg(`[WORKSPACE CONTEXT]\n${state.workspaceContext}`));
+    messages.push(userMsg(`[WORKSPACE CONTEXT]\n${capContext(state.workspaceContext, 1500)}`));
   }
 
   for (const msg of state.messages) {

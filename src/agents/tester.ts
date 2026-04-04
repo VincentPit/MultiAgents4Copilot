@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import { AgentState, AgentMessage, postAgentMessage, getMessagesFor } from "../graph/state";
-import { callModel, selectModel, MODELS, sysMsg, userMsg, assistantMsg, truncateMessages, safeBudget } from "./base";
+import { callModel, selectModel, MODELS, sysMsg, userMsg, assistantMsg, truncateMessages, safeBudget, capContext } from "./base";
 import { logger } from "../utils/logger";
 
 const SYSTEM_PROMPT = `You are a senior test engineer specialising in automated testing.
@@ -68,7 +68,7 @@ export async function testGen(
 
   let fullSystemPrompt = SYSTEM_PROMPT + contextBlock;
   if (state.workspaceContext) {
-    fullSystemPrompt += `\n\n${state.workspaceContext}`;
+    fullSystemPrompt += `\n\n${capContext(state.workspaceContext, 2000)}`;
   }
 
   const messages: vscode.LanguageModelChatMessage[] = [sysMsg(fullSystemPrompt)];

@@ -4,7 +4,7 @@
 
 import * as vscode from "vscode";
 import { AgentState, AgentMessage } from "../graph/state";
-import { callModel, sysMsg, userMsg, assistantMsg, truncateMessages, safeBudget } from "./base";
+import { callModel, sysMsg, userMsg, assistantMsg, truncateMessages, safeBudget, capContext } from "./base";
 
 const SYSTEM_PROMPT = `You are the Planner agent on a multi-agent coding team.
 
@@ -31,7 +31,7 @@ export async function plannerNode(
   const messages: vscode.LanguageModelChatMessage[] = [sysMsg(SYSTEM_PROMPT)];
 
   if (state.workspaceContext) {
-    messages.push(userMsg(`[WORKSPACE CONTEXT]\n${state.workspaceContext}`));
+    messages.push(userMsg(`[WORKSPACE CONTEXT]\n${capContext(state.workspaceContext, 2000)}`));
   }
 
   for (const msg of state.messages) {

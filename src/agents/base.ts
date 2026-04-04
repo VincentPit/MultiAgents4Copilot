@@ -86,10 +86,10 @@ const MAX_RETRIES = 2;
 export function safeBudget(model: vscode.LanguageModelChat): number {
   const reported = (model as any).maxInputTokens;
   if (typeof reported === "number" && reported > 0) {
-    // Use 75% of reported to leave room for output tokens + safety margin
-    return Math.floor(reported * 0.75);
+    // Use 50% of reported to leave generous room — Copilot API is strict
+    return Math.min(Math.floor(reported * 0.5), 12000);
   }
-  return 16000; // conservative default
+  return 8000; // conservative default for Copilot API
 }
 
 /**
@@ -124,11 +124,19 @@ export async function callModel(
       const is400 = errMsg.includes("400") || errMsg.includes("Bad Request");
       logger.warn(agentName, `Attempt ${attempt}/${MAX_RETRIES} failed: ${errMsg}`);
 
-      // If 400 = context too large, try truncating messages harder
+      // If 400 = context too large, aggressively strip to minimum
       if (is400 && messages.length > 2) {
-        logger.warn(agentName, "400 detected — halving message list for retry");
-        const half = Math.max(2, Math.floor(messages.length / 2));
-        messages = [messages[0], ...messages.slice(-half)];
+        logger.warn(agentName, `400 detected — stripping to system+last (was ${messages.length} msgs)`);
+        // Keep only the system message and the very last user message
+        const last = messages[messages.length - 1];
+        const sys = messages[0];
+        // Also hard-truncate the system message to 2000 tokens
+        const sysText = messageText(sys);
+        if (estimateTokens(sysText) > 2000) {
+          messages = [sysMsg(truncateText(sysText, 2000).replace(/^\[SYSTEM INSTRUCTIONS\]\n/, "")), last];
+        } else {
+          messages = [sys, last];
+        }
       }
 
       if (attempt < MAX_RETRIES) {
@@ -173,6 +181,12 @@ export async function callModel(
 
 // ── Message builders ─────────────────────────────────────────────────
 
+/** Cap a workspace context string to a safe size for injection into prompts. */
+export function capContext(ctx: string, maxChars: number = 2000): string {
+  if (ctx.length <= maxChars) { return ctx; }
+  return ctx.slice(0, maxChars) + "\n[… context truncated to fit]";
+}
+
 export function sysMsg(content: string): vscode.LanguageModelChatMessage {
   return vscode.LanguageModelChatMessage.User(`[SYSTEM INSTRUCTIONS]\n${content}`);
 }
@@ -194,17 +208,29 @@ function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
-/** Extract text from a LanguageModelChatMessage (handles different internal shapes). */
+/** Extract text from a LanguageModelChatMessage using the VS Code API. */
 function messageText(msg: vscode.LanguageModelChatMessage): string {
-  // The VS Code API stores parts as LanguageModelTextPart[]
   try {
-    const parts = (msg as any).content ?? (msg as any)._parts ?? (msg as any).parts ?? [];
-    if (Array.isArray(parts)) {
-      return parts.map((p: any) => p?.value ?? p?.text ?? (typeof p === "string" ? p : "")).join("");
+    // VS Code API: msg.content is Array<LanguageModelTextPart | ...>
+    // LanguageModelTextPart has a .value string property
+    const content = (msg as any).content;
+    if (typeof content === "string") { return content; }
+    if (Array.isArray(content)) {
+      return content
+        .map((p: any) => {
+          if (typeof p === "string") { return p; }
+          // LanguageModelTextPart: has .value
+          if (p && typeof p.value === "string") { return p.value; }
+          // Fallback: try .text
+          if (p && typeof p.text === "string") { return p.text; }
+          return "";
+        })
+        .join("");
     }
-    if (typeof parts === "string") { return parts; }
   } catch { /* fallback */ }
-  return "";
+  // Last resort: stringify the message — guarantees we NEVER return empty
+  // for a message that has real content.
+  try { return JSON.stringify(msg).slice(0, 1000); } catch { return "[unreadable]"; }
 }
 
 /**
@@ -226,7 +252,7 @@ function truncateText(text: string, maxTokens: number): string {
  */
 export function truncateMessages(
   messages: vscode.LanguageModelChatMessage[],
-  maxTokens: number = 16000
+  maxTokens: number = 8000
 ): vscode.LanguageModelChatMessage[] {
   if (messages.length === 0) { return messages; }
 

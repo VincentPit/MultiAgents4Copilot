@@ -72,6 +72,9 @@ export function buildGraph(config: GraphConfig) {
     const agentRuns: AgentRun[] = [];
     const graphStart = Date.now();
 
+    // Track consecutive failures to prevent supervisor→agent→fail loops
+    const failedAgents = new Set<string>();
+
     while (currentNode !== "__end__" && steps < maxSteps) {
       if (token.isCancellationRequested) {
         state.status = "error";
@@ -95,13 +98,30 @@ export function buildGraph(config: GraphConfig) {
       let update: Partial<AgentState>;
       try {
         update = await nodeFn(state, model, stream, token);
+        // Success — clear this agent from the failed set
+        failedAgents.delete(currentNode);
       } catch (err: any) {
         const errMsg = err?.message ?? String(err);
         logger.error(currentNode, `Agent failed: ${errMsg}`);
         stream.markdown(`\n\n> ⚠️ **${display.label}** encountered an error: ${errMsg}\n`);
         state.errors = [...(state.errors ?? []), `${currentNode}: ${errMsg}`];
-        // Skip to supervisor to re-route
+
+        // Mark this agent as failed
+        failedAgents.add(currentNode);
+
+        // If 2+ agents have failed, or same agent failed, just finish
+        if (failedAgents.size >= 2) {
+          logger.warn("graph", `Multiple agents failed (${[...failedAgents].join(", ")}). Finishing.`);
+          stream.markdown(`\n\n> ⚠️ Multiple agents failed. Finishing with available results.\n`);
+          state.status = "completed";
+          currentNode = "__end__";
+          steps++;
+          continue;
+        }
+
+        // Skip to supervisor to re-route, but tell it which agent failed
         state.nextAgent = "supervisor";
+        state.errors = [...(state.errors ?? []), `DO_NOT_ROUTE:${currentNode}`];
         currentNode = "supervisor";
         steps++;
         continue;
@@ -115,7 +135,16 @@ export function buildGraph(config: GraphConfig) {
 
       // Route to next node
       if (currentNode === "supervisor") {
-        currentNode = routeSupervisor(state);
+        const nextNode = routeSupervisor(state);
+        // If supervisor wants to route to a failed agent, force finish instead
+        if (failedAgents.has(nextNode)) {
+          logger.warn("graph", `Supervisor tried to route to failed agent "${nextNode}". Finishing.`);
+          stream.markdown(`\n\n> ⚠️ Skipping **${nextNode}** (previously failed). Finishing with available results.\n`);
+          currentNode = "__end__";
+          state.status = "completed";
+        } else {
+          currentNode = nextNode;
+        }
       } else if (currentNode === "reviewer") {
         currentNode = routeReviewer(state);
       } else {

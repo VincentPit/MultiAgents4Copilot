@@ -128,17 +128,23 @@ export async function researcherNode(
   if (allResults && allResults.repos.length > 0) {
     fullSystemPrompt += repoContextForLLM(allResults);
   }
+  // Cap workspace context injected into system prompt to avoid 400s
   if (state.workspaceContext) {
-    fullSystemPrompt += `\n\n${state.workspaceContext}`;
+    const wsCtx = state.workspaceContext.length > 1500
+      ? state.workspaceContext.slice(0, 1500) + "\n[… workspace context truncated]"
+      : state.workspaceContext;
+    fullSystemPrompt += `\n\n${wsCtx}`;
+  }
+
+  // Hard-cap the entire system prompt to ~2500 tokens (~10000 chars)
+  if (fullSystemPrompt.length > 10000) {
+    fullSystemPrompt = fullSystemPrompt.slice(0, 10000) + "\n[… system prompt truncated to fit context window]";
   }
 
   const messages: vscode.LanguageModelChatMessage[] = [sysMsg(fullSystemPrompt)];
-  for (const msg of state.messages) {
-    if (msg.role === "user") {
-      messages.push(userMsg(msg.content));
-    } else if (msg.role === "assistant") {
-      messages.push(assistantMsg(msg.content));
-    }
+  // Only add the last user message to keep context small
+  if (lastUserMsg) {
+    messages.push(userMsg(lastUserMsg));
   }
 
   stream.markdown(`#### 📝 Analysis\n\n`);
