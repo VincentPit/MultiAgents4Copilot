@@ -77,7 +77,7 @@ export async function selectModel(
 
 // ── Model calling with retry + fallback ──────────────────────────────
 
-const MAX_RETRIES = 2;
+const MAX_RETRIES = 3;
 
 /**
  * Compute a safe token budget for a model.
@@ -107,6 +107,11 @@ export async function callModel(
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
+      // Log what we're sending so we can debug 400s
+      const totalChars = messages.reduce((sum, m) => sum + messageText(m).length, 0);
+      const estTokens = Math.ceil(totalChars / 4);
+      logger.info(agentName, `Attempt ${attempt}: sending ${messages.length} msgs, ~${estTokens} tokens (~${totalChars} chars)`);
+
       const response = await model.sendRequest(messages, {}, token);
       const chunks: string[] = [];
 
@@ -160,7 +165,11 @@ export async function callModel(
         if (stream) {
           stream.markdown(`\n\n> ⚠️ Primary model failed — falling back to **${fallback.label}**\n\n`);
         }
-        const response = await fbModel.sendRequest(messages, {}, token);
+        // Also apply truncation for the fallback attempt
+        const fbBudget = safeBudget(fbModel);
+        const fbMessages = truncateMessages([...messages], fbBudget);
+        logger.info(agentName, `Fallback: sending ${fbMessages.length} msgs, budget ~${fbBudget} tokens`);
+        const response = await fbModel.sendRequest(fbMessages, {}, token);
         const chunks: string[] = [];
         for await (const chunk of response.text) {
           chunks.push(chunk);

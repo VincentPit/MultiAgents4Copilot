@@ -47,12 +47,16 @@ export async function supervisorNode(
     messages.push(userMsg(`[WORKSPACE CONTEXT]\n${capContext(state.workspaceContext, 1500)}`));
   }
 
-  for (const msg of state.messages) {
+  // Only include the last few messages — supervisor just needs to pick an agent
+  const recentMsgs = state.messages.slice(-3);
+  for (const msg of recentMsgs) {
     if (msg.role === "user") {
       messages.push(userMsg(msg.content));
     } else if (msg.role === "assistant") {
       const label = msg.name ? `[${msg.name}] ` : "";
-      messages.push(assistantMsg(label + msg.content));
+      // Cap each assistant message to 300 chars for supervisor routing
+      const content = label + (msg.content.length > 300 ? msg.content.slice(0, 300) + "…" : msg.content);
+      messages.push(assistantMsg(content));
     }
   }
 

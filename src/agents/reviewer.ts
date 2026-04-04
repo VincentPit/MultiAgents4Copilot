@@ -45,11 +45,13 @@ export async function reviewerNode(
     messages.push(userMsg(`[WORKSPACE CONTEXT]\n${capContext(state.workspaceContext, 2000)}`));
   }
 
-  for (const msg of state.messages) {
+  // Only include the last 3 messages to keep context manageable
+  const recentMsgs = state.messages.slice(-3);
+  for (const msg of recentMsgs) {
     if (msg.role === "user") {
       messages.push(userMsg(msg.content));
     } else if (msg.role === "assistant") {
-      messages.push(assistantMsg(msg.content));
+      messages.push(assistantMsg(capContext(msg.content, 1500)));
     }
   }
 

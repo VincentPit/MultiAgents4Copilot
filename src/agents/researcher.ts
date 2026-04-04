@@ -150,10 +150,15 @@ export async function researcherNode(
   stream.markdown(`#### 📝 Analysis\n\n`);
   const response = await callModel(model, truncateMessages(messages, safeBudget(model)), stream, token, "researcher");
 
+  // Cap what we store in state.messages to avoid bloating context for downstream agents
+  const cappedResponse = response.length > 1500
+    ? response.slice(0, 1500) + "\n[… research truncated in state]"
+    : response;
+
   const newMessage: AgentMessage = {
     role: "assistant",
     name: "researcher",
-    content: response,
+    content: cappedResponse,
   };
 
   // Post research (including repo context) to the message bus

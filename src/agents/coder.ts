@@ -33,33 +33,40 @@ export async function coderNode(
 
   let systemPrompt = SYSTEM_PROMPT;
 
-  // Inject workspace context so coder can see the actual files
+  // Inject workspace context — small cap since code prompts are large
   if (state.workspaceContext) {
-    systemPrompt += `\n\n${capContext(state.workspaceContext, 2000)}`;
+    systemPrompt += `\n\n${capContext(state.workspaceContext, 1200)}`;
   }
 
+  // Inject plan — cap to 800 chars
   if (state.plan.length > 0) {
-    systemPrompt += `\n\n## Current Plan\n${state.plan.join("\n")}`;
+    const planText = state.plan.join("\n");
+    systemPrompt += `\n\n## Current Plan\n${capContext(planText, 800)}`;
   }
+
+  // Inject reviewer feedback — cap to 500 chars
   if (state.artifacts["review_feedback"]) {
-    systemPrompt += `\n\n## Reviewer Feedback (address this)\n${state.artifacts["review_feedback"]}`;
+    systemPrompt += `\n\n## Reviewer Feedback\n${capContext(state.artifacts["review_feedback"], 500)}`;
   }
 
-  // Check for inter-agent messages addressed to coder
-  const incomingMsgs = getMessagesFor(state, "coder");
+  // Inter-agent messages — only last 2, capped
+  const incomingMsgs = getMessagesFor(state, "coder").slice(-2);
   if (incomingMsgs.length > 0) {
-    const commsContext = incomingMsgs.map(m => `[From ${m.from}]: ${m.content}`).join("\n");
-    systemPrompt += `\n\n## Messages from other agents\n${commsContext}`;
+    const commsContext = incomingMsgs.map(m => `[${m.from}]: ${capContext(m.content, 300)}`).join("\n");
+    systemPrompt += `\n\n## Agent Messages\n${commsContext}`;
   }
 
-  const messages: vscode.LanguageModelChatMessage[] = [sysMsg(systemPrompt)];
-  for (const msg of state.messages) {
-    if (msg.role === "user") {
-      messages.push(userMsg(msg.content));
-    } else if (msg.role === "assistant") {
-      messages.push(assistantMsg(msg.content));
-    }
+  // Hard-cap the entire system prompt to ~1500 tokens
+  if (systemPrompt.length > 6000) {
+    systemPrompt = systemPrompt.slice(0, 6000) + "\n[… prompt truncated]";
   }
+
+  // Build messages: system + ONLY the last user message (not full history)
+  const lastUserContent = [...state.messages].reverse().find(m => m.role === "user")?.content ?? "";
+  const messages: vscode.LanguageModelChatMessage[] = [
+    sysMsg(systemPrompt),
+    userMsg(lastUserContent),
+  ];
 
   const response = await callModel(model, truncateMessages(messages, safeBudget(model)), stream, token, "coder");
 

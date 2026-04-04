@@ -50,14 +50,19 @@ export async function plannerNode(
     .map((l) => l.trim())
     .filter((l) => /^\d+[\.\)]/.test(l));
 
+  // Cap what we store in state.messages to avoid bloating context for downstream agents
+  const cappedResponse = response.length > 1500
+    ? response.slice(0, 1500) + "\n[… plan truncated in state]"
+    : response;
+
   const newMessage: AgentMessage = {
     role: "assistant",
     name: "planner",
-    content: response,
+    content: cappedResponse,
   };
 
   return {
     messages: [newMessage],
-    plan: lines.length > 0 ? lines : [response],
+    plan: lines.length > 0 ? lines : [cappedResponse],
   };
 }
