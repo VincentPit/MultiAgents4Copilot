@@ -1,0 +1,67 @@
+{
+  "name": "multi-agent-copilot",
+  "displayName": "Multi-Agent Copilot",
+  "description": "Graph-based multi-agent system inside the Copilot chat panel",
+  "version": "0.2.0",
+  "publisher": "stephenlee",
+  "engines": {
+    "vscode": "^1.93.0"
+  },
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "extensionDependencies": [
+    "github.copilot-chat"
+  ],
+  "contributes": {
+    "chatParticipants": [
+      {
+        "id": "multi-agent-copilot.team",
+        "fullName": "Multi-Agent Copilot",
+        "name": "team",
+        "description": "A graph-based multi-agent team: planner, coder, researcher, reviewer, UI designer, and test generator — orchestrated by a supervisor with inter-agent communication.",
+        "isSticky": true,
+        "commands": [
+          {
+            "name": "plan",
+            "description": "Break down a task into a step-by-step plan"
+          },
+          {
+            "name": "code",
+            "description": "Generate or edit code"
+          },
+          {
+            "name": "research",
+            "description": "Research a topic, API, or library"
+          },
+          {
+            "name": "review",
+            "description": "Review code for correctness and quality"
+          },
+          {
+            "name": "design",
+            "description": "Design UI components, layouts, and interfaces (Gemini 3 Pro)"
+          },
+          {
+            "name": "test",
+            "description": "Generate unit tests and test suites"
+          }
+        ]
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.93.0",
+    "typescript": "^5.5.0"
+  }
+}
