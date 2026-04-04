@@ -4,7 +4,7 @@
 
 import * as vscode from "vscode";
 import { AgentState, AgentMessage } from "../graph/state";
-import { callModel, sysMsg, userMsg, assistantMsg, truncateMessages } from "./base";
+import { callModel, sysMsg, userMsg, assistantMsg, truncateMessages, safeBudget } from "./base";
 
 const SYSTEM_PROMPT = `You are the Planner agent on a multi-agent coding team.
 
@@ -42,7 +42,7 @@ export async function plannerNode(
     }
   }
 
-  const response = await callModel(model, truncateMessages(messages), stream, token, "planner");
+  const response = await callModel(model, truncateMessages(messages, safeBudget(model)), stream, token, "planner");
 
   // Parse numbered lines
   const lines = response

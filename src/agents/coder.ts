@@ -4,7 +4,7 @@
 
 import * as vscode from "vscode";
 import { AgentState, AgentMessage, postAgentMessage, getMessagesFor } from "../graph/state";
-import { callModel, sysMsg, userMsg, assistantMsg, truncateMessages } from "./base";
+import { callModel, sysMsg, userMsg, assistantMsg, truncateMessages, safeBudget } from "./base";
 import { logger } from "../utils/logger";
 
 const SYSTEM_PROMPT = `You are the Coder agent — an expert software engineer.
@@ -61,7 +61,7 @@ export async function coderNode(
     }
   }
 
-  const response = await callModel(model, truncateMessages(messages), stream, token, "coder");
+  const response = await callModel(model, truncateMessages(messages, safeBudget(model)), stream, token, "coder");
 
   // Post code to the message bus so other agents can read it
   postAgentMessage(state, "coder", "*", "info", response);

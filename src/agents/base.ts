@@ -80,6 +80,19 @@ export async function selectModel(
 const MAX_RETRIES = 2;
 
 /**
+ * Compute a safe token budget for a model.
+ * Uses model.maxInputTokens if available, otherwise defaults conservatively.
+ */
+export function safeBudget(model: vscode.LanguageModelChat): number {
+  const reported = (model as any).maxInputTokens;
+  if (typeof reported === "number" && reported > 0) {
+    // Use 75% of reported to leave room for output tokens + safety margin
+    return Math.floor(reported * 0.75);
+  }
+  return 16000; // conservative default
+}
+
+/**
  * Call a model with automatic retry and fallback.
  * Streams tokens to the chat panel in real-time.
  */
@@ -108,7 +121,15 @@ export async function callModel(
     } catch (err) {
       lastError = err;
       const errMsg = err instanceof Error ? err.message : String(err);
+      const is400 = errMsg.includes("400") || errMsg.includes("Bad Request");
       logger.warn(agentName, `Attempt ${attempt}/${MAX_RETRIES} failed: ${errMsg}`);
+
+      // If 400 = context too large, try truncating messages harder
+      if (is400 && messages.length > 2) {
+        logger.warn(agentName, "400 detected — halving message list for retry");
+        const half = Math.max(2, Math.floor(messages.length / 2));
+        messages = [messages[0], ...messages.slice(-half)];
+      }
 
       if (attempt < MAX_RETRIES) {
         // Small backoff before retry
@@ -168,57 +189,86 @@ export function assistantMsg(content: string): vscode.LanguageModelChatMessage {
 
 /**
  * Estimate token count (rough: 1 token ≈ 4 chars).
- * Real tokenisers vary, but this keeps us safely under limits.
  */
 function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }
 
+/** Extract text from a LanguageModelChatMessage (handles different internal shapes). */
+function messageText(msg: vscode.LanguageModelChatMessage): string {
+  // The VS Code API stores parts as LanguageModelTextPart[]
+  try {
+    const parts = (msg as any).content ?? (msg as any)._parts ?? (msg as any).parts ?? [];
+    if (Array.isArray(parts)) {
+      return parts.map((p: any) => p?.value ?? p?.text ?? (typeof p === "string" ? p : "")).join("");
+    }
+    if (typeof parts === "string") { return parts; }
+  } catch { /* fallback */ }
+  return "";
+}
+
+/**
+ * Hard-truncate a single string to fit a token budget.
+ */
+function truncateText(text: string, maxTokens: number): string {
+  const maxChars = maxTokens * 4;
+  if (text.length <= maxChars) { return text; }
+  return text.slice(0, maxChars) + "\n[… truncated to fit context window]";
+}
+
 /**
  * Truncate a message list to fit within a token budget.
- * Always keeps the system message (index 0) and the last user message.
- * Trims from the middle of the conversation.
+ *
+ * Strategy:
+ * 1. If the system message (index 0) itself exceeds 40% of the budget, hard-truncate it.
+ * 2. Always keep the system message + last user message.
+ * 3. Fill remaining budget from the END of the conversation backwards.
  */
 export function truncateMessages(
   messages: vscode.LanguageModelChatMessage[],
-  maxTokens: number = 28000
+  maxTokens: number = 16000
 ): vscode.LanguageModelChatMessage[] {
-  // Estimate total tokens
-  let totalTokens = 0;
-  const tokenCounts = messages.map(m => {
-    // Access the text content — LanguageModelChatMessage stores parts
-    const text = (m as any).content?.[0]?.value ?? (m as any).content ?? "";
-    const count = estimateTokens(typeof text === "string" ? text : JSON.stringify(text));
-    totalTokens += count;
-    return count;
-  });
+  if (messages.length === 0) { return messages; }
+
+  // Step 1: Read and measure all messages
+  const texts = messages.map(m => messageText(m));
+  let tokenCounts = texts.map(t => estimateTokens(t));
+  let totalTokens = tokenCounts.reduce((a, b) => a + b, 0);
+
+  // Step 2: If system message (index 0) is over 40% of budget, hard-truncate it
+  const sysMaxTokens = Math.floor(maxTokens * 0.4);
+  if (tokenCounts[0] > sysMaxTokens) {
+    logger.warn("truncation", `System message ~${tokenCounts[0]} tokens, capping to ~${sysMaxTokens}`);
+    const truncatedSys = truncateText(texts[0], sysMaxTokens);
+    messages[0] = sysMsg(truncatedSys.replace(/^\[SYSTEM INSTRUCTIONS\]\n/, ""));
+    texts[0] = truncatedSys;
+    totalTokens = totalTokens - tokenCounts[0] + estimateTokens(truncatedSys);
+    tokenCounts[0] = estimateTokens(truncatedSys);
+  }
 
   if (totalTokens <= maxTokens) { return messages; }
 
-  logger.warn("truncation", `Messages ~${totalTokens} tokens, trimming to ~${maxTokens}`);
+  logger.warn("truncation", `Total ~${totalTokens} tokens, trimming to ~${maxTokens}`);
 
-  // Always keep: first (system) + last (latest user prompt)
+  // Step 3: Keep system (0) + last message, fill backwards
   const keep = new Set([0, messages.length - 1]);
   let budget = maxTokens - tokenCounts[0] - tokenCounts[messages.length - 1];
 
-  // Fill from the end backwards (recent context is most valuable)
   for (let i = messages.length - 2; i > 0; i--) {
     if (budget - tokenCounts[i] > 0) {
       keep.add(i);
       budget -= tokenCounts[i];
-    } else {
-      break;
     }
+    // Don't break — skip large messages and try smaller ones
   }
 
   const trimmed = messages.filter((_, i) => keep.has(i));
 
-  // Insert a notice so the model knows context was trimmed
   if (trimmed.length < messages.length) {
     const dropped = messages.length - trimmed.length;
-    trimmed.splice(1, 0, userMsg(`[Note: ${dropped} earlier messages were trimmed to fit context window]`));
+    trimmed.splice(1, 0, userMsg(`[Note: ${dropped} earlier messages were trimmed to fit context]`));
+    logger.info("truncation", `Kept ${trimmed.length}/${messages.length} messages`);
   }
 
-  logger.info("truncation", `Kept ${trimmed.length}/${messages.length} messages`);
   return trimmed;
 }

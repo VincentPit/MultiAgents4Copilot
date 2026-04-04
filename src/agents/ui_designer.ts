@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 import { AgentState, AgentMessage, postAgentMessage, getMessagesFor } from "../graph/state";
-import { callModel, selectModel, MODELS, sysMsg, userMsg, assistantMsg, truncateMessages } from "./base";
+import { callModel, selectModel, MODELS, sysMsg, userMsg, assistantMsg, truncateMessages, safeBudget } from "./base";
 import { logger } from "../utils/logger";
 
 const SYSTEM_PROMPT = `You are a senior UI/UX designer and front-end architect.
@@ -68,7 +68,7 @@ export async function uiDesigner(
     }
   }
 
-  const response = await callModel(activeModel, truncateMessages(messages), stream, token, "ui_designer");
+  const response = await callModel(activeModel, truncateMessages(messages, safeBudget(activeModel)), stream, token, "ui_designer");
 
   const newMessage: AgentMessage = {
     role: "assistant",

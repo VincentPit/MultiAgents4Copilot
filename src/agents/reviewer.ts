@@ -4,7 +4,7 @@
 
 import * as vscode from "vscode";
 import { AgentState, AgentMessage, ReviewVerdict, postAgentMessage } from "../graph/state";
-import { callModel, sysMsg, userMsg, assistantMsg, truncateMessages } from "./base";
+import { callModel, sysMsg, userMsg, assistantMsg, truncateMessages, safeBudget } from "./base";
 import { logger } from "../utils/logger";
 
 const MAX_REVIEWS = 3;
@@ -55,7 +55,7 @@ export async function reviewerNode(
 
   messages.push(userMsg(`## Code to Review\n\n${code}`));
 
-  const response = await callModel(model, truncateMessages(messages), stream, token, "reviewer");
+  const response = await callModel(model, truncateMessages(messages, safeBudget(model)), stream, token, "reviewer");
 
   const approved = response.toUpperCase().includes("VERDICT: APPROVE");
   const newCount = state.reviewCount + 1;

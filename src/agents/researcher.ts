@@ -5,7 +5,7 @@
 
 import * as vscode from "vscode";
 import { AgentState, AgentMessage, postAgentMessage } from "../graph/state";
-import { callModel, sysMsg, userMsg, assistantMsg, truncateMessages } from "./base";
+import { callModel, sysMsg, userMsg, assistantMsg, truncateMessages, safeBudget } from "./base";
 import { logger } from "../utils/logger";
 import {
   searchGitHubRepos,
@@ -142,7 +142,7 @@ export async function researcherNode(
   }
 
   stream.markdown(`#### 📝 Analysis\n\n`);
-  const response = await callModel(model, truncateMessages(messages), stream, token, "researcher");
+  const response = await callModel(model, truncateMessages(messages, safeBudget(model)), stream, token, "researcher");
 
   const newMessage: AgentMessage = {
     role: "assistant",

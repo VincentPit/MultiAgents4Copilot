@@ -5,7 +5,7 @@
 
 import * as vscode from "vscode";
 import { AgentState } from "../graph/state";
-import { callModel, sysMsg, userMsg, assistantMsg, truncateMessages } from "./base";
+import { callModel, sysMsg, userMsg, assistantMsg, truncateMessages, safeBudget } from "./base";
 import { logger } from "../utils/logger";
 
 const SYSTEM_PROMPT = `You are the Supervisor of a multi-agent coding team.
@@ -59,7 +59,7 @@ export async function supervisorNode(
   messages.push(userMsg("Which agent should act next? Reply with ONE word only."));
 
   // Don't stream supervisor reasoning to the user (pass null)
-  const response = await callModel(model, truncateMessages(messages, 12000), null, token, "supervisor");
+  const response = await callModel(model, truncateMessages(messages, safeBudget(model)), null, token, "supervisor");
   const decision = response.trim().toLowerCase().replace(/[^a-z]/g, "");
 
   const valid = new Set(["planner", "coder", "researcher", "reviewer", "ui_designer", "test_gen", "finish"]);

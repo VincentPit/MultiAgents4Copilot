@@ -51,7 +51,7 @@ export async function getWorkspaceSnapshot(): Promise<WorkspaceSnapshot> {
     const content = doc.getText();
     activeFile = {
       path: vscode.workspace.asRelativePath(doc.uri),
-      content: truncate(content, 8000),
+      content: truncate(content, 3000),
       language: doc.languageId,
     };
   }
@@ -89,7 +89,7 @@ export async function getWorkspaceSnapshot(): Promise<WorkspaceSnapshot> {
         const doc = await vscode.workspace.openTextDocument(files[0]);
         projectMeta.push({
           path: vscode.workspace.asRelativePath(files[0]),
-          content: truncate(doc.getText(), 3000),
+          content: truncate(doc.getText(), 1500),
         });
       } catch { /* skip unreadable */ }
     }

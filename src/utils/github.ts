@@ -179,17 +179,15 @@ export function formatRepoResults(result: GitHubSearchResult): string {
 export function repoContextForLLM(result: GitHubSearchResult): string {
   if (result.repos.length === 0) { return ""; }
 
-  const entries = result.repos.map((r, i) =>
-    `${i + 1}. ${r.fullName} (⭐${formatCount(r.stars)}, ${r.language ?? "unknown"}) — ${r.description}`
-    + (r.topics.length > 0 ? ` [topics: ${r.topics.slice(0, 5).join(", ")}]` : "")
-    + (r.license ? ` [license: ${r.license}]` : "")
-  );
+  // Only include top 5 repos and cap description length to keep context small
+  const entries = result.repos.slice(0, 5).map((r, i) => {
+    const desc = r.description.length > 100 ? r.description.slice(0, 97) + "…" : r.description;
+    return `${i + 1}. ${r.fullName} (⭐${formatCount(r.stars)}, ${r.language ?? "?"}) — ${desc}`;
+  });
 
   return [
-    `\n## Real GitHub repositories matching the user's idea`,
-    `The following popular open-source projects are similar to what the user wants to build.`,
-    `Reference them in your analysis — mention what makes them good, what patterns they use,`,
-    `and what the user can learn from them.\n`,
+    `\n## GitHub repos matching the user's idea`,
+    `Reference these in your analysis:\n`,
     ...entries,
   ].join("\n");
 }
