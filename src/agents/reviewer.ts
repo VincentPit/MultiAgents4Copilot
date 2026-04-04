@@ -3,21 +3,21 @@
  */
 
 import * as vscode from "vscode";
-import { AgentState, AgentMessage, ReviewVerdict, postAgentMessage } from "../graph/state";
-import { callModel, sysMsg, userMsg, assistantMsg, truncateMessages, safeBudget, capContext } from "./base";
+import { AgentState, AgentMessage, postAgentMessage } from "../graph/state";
+import { callModel, buildMessages, capContext } from "./base";
 import { logger } from "../utils/logger";
 
 const MAX_REVIEWS = 3;
 
-const SYSTEM_PROMPT = `You are the Reviewer agent — a senior code reviewer.
+const SYSTEM_PROMPT = `You are the Reviewer agent \u2014 a senior code reviewer.
 
-Examine the latest code produced by the coder and evaluate it on:
-1. **Correctness** – Does it solve the stated problem?
-2. **Quality** – Is it clean, readable, and idiomatic?
-3. **Edge cases** – Are error/edge cases handled?
-4. **Security** – Any obvious security issues?
+Examine the code and evaluate on:
+1. Correctness \u2014 Does it solve the stated problem?
+2. Quality \u2014 Clean, readable, idiomatic?
+3. Edge cases \u2014 Error handling?
+4. Security \u2014 Any obvious issues?
 
-At the END of your review, output exactly one of these verdicts on its own line:
+At the END of your review, output exactly one verdict on its own line:
   VERDICT: APPROVE
   VERDICT: REVISE
 
@@ -32,50 +32,46 @@ export async function reviewerNode(
   const cycle = state.reviewCount + 1;
   stream.markdown(
     `---\n\n` +
-    `#### ✅ Reviewer — Code review (cycle ${cycle}/${MAX_REVIEWS})\n\n`
+    `#### \u{2705} Reviewer \u{2014} Code review (cycle ${cycle}/${MAX_REVIEWS})\n\n`
   );
 
-  const code = state.artifacts["last_code"] ?? "No code produced yet.";
+  const code = capContext(state.artifacts["last_code"] ?? "No code produced yet.", 2000);
+  const lastUserMsg = [...state.messages].reverse().find(m => m.role === "user")?.content ?? "";
 
-  const messages: vscode.LanguageModelChatMessage[] = [
-    sysMsg(SYSTEM_PROMPT),
-  ];
+  // Build system prompt with code to review embedded
+  const sysPrompt = SYSTEM_PROMPT + `\n\n## Code to Review\n\`\`\`\n${code}\n\`\`\``;
 
-  if (state.workspaceContext) {
-    messages.push(userMsg(`[WORKSPACE CONTEXT]\n${capContext(state.workspaceContext, 2000)}`));
-  }
+  const messages = buildMessages({
+    systemPrompt: sysPrompt,
+    workspaceContext: state.workspaceContext,
+    userQuestion: lastUserMsg || "Review the code above",
+    maxSystemChars: 4000,
+    maxWorkspaceChars: 800,
+  });
 
-  // Only include the last 3 messages to keep context manageable
-  const recentMsgs = state.messages.slice(-3);
-  for (const msg of recentMsgs) {
-    if (msg.role === "user") {
-      messages.push(userMsg(msg.content));
-    } else if (msg.role === "assistant") {
-      messages.push(assistantMsg(capContext(msg.content, 1500)));
-    }
-  }
-
-  messages.push(userMsg(`## Code to Review\n\n${code}`));
-
-  const response = await callModel(model, truncateMessages(messages, safeBudget(model)), stream, token, "reviewer");
+  const response = await callModel(model, messages, stream, token, "reviewer");
 
   const approved = response.toUpperCase().includes("VERDICT: APPROVE");
   const newCount = state.reviewCount + 1;
   const forceApprove = newCount >= MAX_REVIEWS;
 
+  const cappedResponse = response.length > 1500
+    ? response.slice(0, 1500) + "\n[... review truncated in state]"
+    : response;
+
   const newMessage: AgentMessage = {
     role: "assistant",
     name: "reviewer",
-    content: response,
+    content: cappedResponse,
   };
 
   if (approved || forceApprove) {
     if (forceApprove && !approved) {
       stream.markdown(
-        `\n\n> ⚡ Max review iterations (${MAX_REVIEWS}) reached — auto-approving.\n`
+        `\n\n> \u{26A1} Max review iterations (${MAX_REVIEWS}) reached \u{2014} auto-approving.\n`
       );
     } else {
-      stream.markdown(`\n\n> \u2705 **APPROVED** \u2014 Code passes review.\n`);
+      stream.markdown(`\n\n> \u{2705} **APPROVED** \u{2014} Code passes review.\n`);
     }
     return {
       messages: [newMessage],
@@ -86,15 +82,15 @@ export async function reviewerNode(
     };
   }
 
-  // Revise \u2014 send feedback back to coder on next loop
-  stream.markdown(`\n\n> \ud83d\udd01 **REVISE** \u2014 Sending feedback back to \ud83d\udcbb **Coder** for another pass\u2026\n`);
-  postAgentMessage(state, "reviewer", "coder", "request", response);
+  // Revise
+  stream.markdown(`\n\n> \u{1F501} **REVISE** \u{2014} Sending feedback back to \u{1F4BB} **Coder** for another pass\u{2026}\n`);
+  postAgentMessage(state, "reviewer", "coder", "request", capContext(response, 1000));
   logger.agentMessage("reviewer", "coder", "Revision feedback posted");
   return {
     messages: [newMessage],
     reviewCount: newCount,
     reviewVerdict: "revise",
-    artifacts: { review_feedback: response },
+    artifacts: { review_feedback: capContext(response, 1000) },
     nextAgent: "coder",
   };
 }

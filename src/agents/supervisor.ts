@@ -1,37 +1,30 @@
 /**
- * Supervisor agent — inspects the conversation and decides which
- * specialist agent should act next.
+ * Supervisor agent - decides which specialist agent should act next.
  */
 
 import * as vscode from "vscode";
 import { AgentState } from "../graph/state";
-import { callModel, sysMsg, userMsg, assistantMsg, truncateMessages, safeBudget, capContext } from "./base";
+import { callModel, buildMessages } from "./base";
 import { logger } from "../utils/logger";
 
 const SYSTEM_PROMPT = `You are the Supervisor of a multi-agent coding team.
 
-Your team members are:
-  \u2022 planner     \u2013 breaks complex tasks into step-by-step plans
-  \u2022 coder       \u2013 writes, edits, and generates code
-  \u2022 researcher  \u2013 searches documentation or explains concepts
-  \u2022 reviewer    \u2013 reviews code for correctness and quality
-  \u2022 ui_designer \u2013 designs UI components, layouts, and styling (uses Gemini 3 Pro)
-  \u2022 test_gen    \u2013 generates unit tests, integration tests, and test suites
-
-Given the conversation so far, decide which agent should act NEXT.
-If the task is fully complete, respond with "FINISH".
+Your team:
+  planner - breaks tasks into step-by-step plans
+  coder - writes and edits code
+  researcher - explains concepts, searches docs
+  reviewer - reviews code quality
+  ui_designer - designs UI components
+  test_gen - generates tests
 
 Rules:
-- For new complex tasks, start with "planner".
-- After a plan is made, route to "coder", "ui_designer", or "researcher" as needed.
-- If the task involves UI/frontend design or components, use "ui_designer".
-- After code is written, route to "test_gen" to generate tests, then "reviewer".
-- If the reviewer approved, respond with "FINISH".
-- For simple questions or explanations, use "researcher".
-- Agents can read messages from each other \u2014 use the right agent for the right job.
+- New complex tasks: start with "planner".
+- After plan exists: route to "coder" or "researcher". NEVER "planner" again.
+- After code is written: route to "reviewer".
+- If reviewer approved: respond "FINISH".
+- Simple questions: use "researcher".
 
-Respond with ONLY one word \u2014 the agent name or FINISH:
-  planner | coder | researcher | reviewer | ui_designer | test_gen | FINISH`;
+Reply with ONLY one word: planner | coder | researcher | reviewer | ui_designer | test_gen | FINISH`;
 
 export async function supervisorNode(
   state: AgentState,
@@ -39,35 +32,41 @@ export async function supervisorNode(
   stream: vscode.ChatResponseStream,
   token: vscode.CancellationToken
 ): Promise<Partial<AgentState>> {
-  // Build the conversation context for the supervisor
-  const messages: vscode.LanguageModelChatMessage[] = [sysMsg(SYSTEM_PROMPT)];
+  const completedAgents = state.messages
+    .filter(m => m.name)
+    .map(m => m.name!)
+    .filter((v, i, a) => a.indexOf(v) === i);
 
-  // Inject workspace context so supervisor knows about the codebase
-  if (state.workspaceContext) {
-    messages.push(userMsg(`[WORKSPACE CONTEXT]\n${capContext(state.workspaceContext, 1500)}`));
-  }
+  const hasPlan = state.plan.length > 0;
+  const lastMsg = state.messages[state.messages.length - 1];
+  const lastSnippet = lastMsg
+    ? `[${lastMsg.name ?? lastMsg.role}]: ${lastMsg.content.slice(0, 150)}`
+    : "none";
 
-  // Only include the last few messages — supervisor just needs to pick an agent
-  const recentMsgs = state.messages.slice(-3);
-  for (const msg of recentMsgs) {
-    if (msg.role === "user") {
-      messages.push(userMsg(msg.content));
-    } else if (msg.role === "assistant") {
-      const label = msg.name ? `[${msg.name}] ` : "";
-      // Cap each assistant message to 300 chars for supervisor routing
-      const content = label + (msg.content.length > 300 ? msg.content.slice(0, 300) + "…" : msg.content);
-      messages.push(assistantMsg(content));
-    }
-  }
+  const question =
+    `Task: ${state.messages.find(m => m.role === "user")?.content ?? "unknown"}\n` +
+    `Agents completed: ${completedAgents.join(", ") || "none"}\n` +
+    `Plan exists: ${hasPlan ? "yes" : "no"}\n` +
+    `Last output: ${lastSnippet}\n` +
+    `Which agent next? One word only.`;
 
-  messages.push(userMsg("Which agent should act next? Reply with ONE word only."));
+  const messages = buildMessages({
+    systemPrompt: SYSTEM_PROMPT,
+    userQuestion: question,
+    maxSystemChars: 600,
+    maxWorkspaceChars: 0,
+  });
 
-  // Don't stream supervisor reasoning to the user (pass null)
-  const response = await callModel(model, truncateMessages(messages, safeBudget(model)), null, token, "supervisor");
-  const decision = response.trim().toLowerCase().replace(/[^a-z]/g, "");
+  const response = await callModel(model, messages, null, token, "supervisor");
+  const decision = response.trim().toLowerCase().replace(/[^a-z_]/g, "");
 
   const valid = new Set(["planner", "coder", "researcher", "reviewer", "ui_designer", "test_gen", "finish"]);
-  const nextAgent = valid.has(decision) ? decision : "finish";
+  let nextAgent = valid.has(decision) ? decision : "finish";
+
+  if (nextAgent === "planner" && hasPlan) {
+    logger.warn("supervisor", "Plan already exists, routing to coder instead");
+    nextAgent = "coder";
+  }
 
   logger.route("supervisor", nextAgent);
 
@@ -75,13 +74,13 @@ export async function supervisorNode(
     return { nextAgent: "finish", status: "completed" };
   }
 
-  // Show routing decision as a visual indicator
   const icons: Record<string, string> = {
-    planner: "📋", coder: "💻", researcher: "🔍", reviewer: "✅"
+    planner: "\u{1F4CB}", coder: "\u{1F4BB}", researcher: "\u{1F50D}", reviewer: "\u2705",
+    ui_designer: "\u{1F3A8}", test_gen: "\u{1F9EA}",
   };
-  const icon = icons[nextAgent] ?? "⚙️";
+  const icon = icons[nextAgent] ?? "\u2699\uFE0F";
   stream.markdown(
-    `\n> 🧠 **Supervisor** decided: route to ${icon} **${nextAgent.charAt(0).toUpperCase() + nextAgent.slice(1)}**\n\n`
+    `\n> \u{1F9E0} **Supervisor** decided: route to ${icon} **${nextAgent.charAt(0).toUpperCase() + nextAgent.slice(1)}**\n\n`
   );
 
   return { nextAgent };

@@ -123,24 +123,38 @@ export async function callModel(
       }
 
       return chunks.join("");
-    } catch (err) {
+    } catch (err: any) {
       lastError = err;
       const errMsg = err instanceof Error ? err.message : String(err);
       const is400 = errMsg.includes("400") || errMsg.includes("Bad Request");
-      logger.warn(agentName, `Attempt ${attempt}/${MAX_RETRIES} failed: ${errMsg}`);
+      // Log comprehensive error details for debugging
+      const errDetails = [
+        `msg=${errMsg}`,
+        err?.code ? `code=${err.code}` : "",
+        err?.cause ? `cause=${String(err.cause).slice(0, 200)}` : "",
+        `type=${err?.constructor?.name ?? typeof err}`,
+      ].filter(Boolean).join(", ");
+      logger.warn(agentName, `Attempt ${attempt}/${MAX_RETRIES} failed: ${errDetails}`);
 
-      // If 400 = context too large, aggressively strip to minimum
-      if (is400 && messages.length > 2) {
-        logger.warn(agentName, `400 detected — stripping to system+last (was ${messages.length} msgs)`);
-        // Keep only the system message and the very last user message
-        const last = messages[messages.length - 1];
-        const sys = messages[0];
-        // Also hard-truncate the system message to 2000 tokens
-        const sysText = messageText(sys);
-        if (estimateTokens(sysText) > 2000) {
-          messages = [sysMsg(truncateText(sysText, 2000).replace(/^\[SYSTEM INSTRUCTIONS\]\n/, "")), last];
-        } else {
-          messages = [sys, last];
+      // If 400 = context too large, aggressively truncate
+      if (is400) {
+        if (messages.length > 2) {
+          logger.warn(agentName, `400 detected — stripping to system+last (was ${messages.length} msgs)`);
+          const last = messages[messages.length - 1];
+          const sys = messages[0];
+          const sysText = messageText(sys);
+          if (estimateTokens(sysText) > 2000) {
+            messages = [sysMsg(truncateText(sysText, 2000).replace(/^\[SYSTEM INSTRUCTIONS\]\n/, "")), last];
+          } else {
+            messages = [sys, last];
+          }
+        } else if (messages.length === 1) {
+          // Single consolidated message — hard-truncate its content
+          const text = messageText(messages[0]);
+          if (text.length > 6000) {
+            logger.warn(agentName, `400 on single msg (${text.length} chars) — truncating to 6000`);
+            messages = [userMsg(text.slice(0, 6000) + "\n[... truncated due to 400]")];
+          }
         }
       }
 
@@ -206,6 +220,39 @@ export function userMsg(content: string): vscode.LanguageModelChatMessage {
 
 export function assistantMsg(content: string): vscode.LanguageModelChatMessage {
   return vscode.LanguageModelChatMessage.Assistant(content);
+}
+
+/**
+ * Build a properly-formatted message array that alternates User/Assistant.
+ *
+ * The VS Code LM API (Copilot backend) can reject requests with consecutive
+ * same-role messages (400 Bad Request). This helper:
+ *  1. Merges the system prompt + workspace context + user question into ONE User message
+ *  2. Ensures strict User/Assistant alternation
+ *  3. Hard-caps each piece to keep total size small
+ */
+export function buildMessages(opts: {
+  systemPrompt: string;
+  workspaceContext?: string;
+  userQuestion: string;
+  maxSystemChars?: number;
+  maxWorkspaceChars?: number;
+}): vscode.LanguageModelChatMessage[] {
+  const maxSys = opts.maxSystemChars ?? 1500;
+  const maxWs = opts.maxWorkspaceChars ?? 1200;
+
+  let combined = capContext(opts.systemPrompt, maxSys);
+  if (opts.workspaceContext) {
+    combined += `\n\n---\n[WORKSPACE]\n${capContext(opts.workspaceContext, maxWs)}`;
+  }
+  combined += `\n\n---\n[USER REQUEST]\n${opts.userQuestion}`;
+
+  // Hard-cap the entire combined message
+  if (combined.length > 12000) {
+    combined = combined.slice(0, 12000) + "\n[… truncated]";
+  }
+
+  return [userMsg(combined)];
 }
 
 // ── Message truncation ───────────────────────────────────────────────

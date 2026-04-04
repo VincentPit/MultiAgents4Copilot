@@ -5,7 +5,7 @@
 
 import * as vscode from "vscode";
 import { AgentState, AgentMessage, postAgentMessage } from "../graph/state";
-import { callModel, sysMsg, userMsg, assistantMsg, truncateMessages, safeBudget } from "./base";
+import { callModel, buildMessages, capContext } from "./base";
 import { logger } from "../utils/logger";
 import {
   searchGitHubRepos,
@@ -16,36 +16,19 @@ import {
 
 // ── Prompts ──────────────────────────────────────────────────────────
 
-/** Tiny prompt used to extract GitHub search keywords from the conversation. */
 const KEYWORD_PROMPT = `You are a search-query generator.
-Given the user's request, produce 1-3 concise GitHub search queries that would
-find high-quality, professional open-source repositories similar to what the
-user wants to build.
-
-Rules:
-- Return ONLY the queries, one per line.
-- Each query should be ≤ 8 words.
-- Use terms GitHub's search understands (language filters like "language:python", topic keywords, etc.).
-- Do NOT include any explanation — just the raw queries.`;
+Given the user's request, produce 1-3 concise GitHub search queries.
+Return ONLY the queries, one per line. Each query 8 words or less.
+Do NOT include any explanation.`;
 
 const SYSTEM_PROMPT = `You are the Researcher agent on a multi-agent coding team.
 
-Your job is to find and synthesise relevant information the team needs.
-This includes API docs, library usage, best practices, architecture patterns,
-and answers to technical questions.
+Find and synthesize relevant information. When GitHub results are provided:
+1. Highlight the top 2-3 most relevant repos and why.
+2. Describe patterns and architecture used.
+3. Suggest files to study.
 
-When GitHub repository search results are provided, you MUST:
-1. Highlight the top 2-3 most relevant repos and explain WHY they're good references.
-2. Describe the architecture or patterns used by these projects.
-3. Suggest which parts / files the user should study.
-4. Note the tech stack, testing approaches, and deployment strategies used.
-
-General rules:
-1. Provide clear, concise summaries.
-2. Use bullet points and tables for scannability.
-3. If you don't know something, say so — don't fabricate.
-4. When applicable, include code snippets demonstrating usage.
-5. End with a "Recommended next steps" section.`;
+Rules: Be concise. Use bullets. Don't fabricate. End with next steps.`;
 
 // ── Agent function ───────────────────────────────────────────────────
 
@@ -66,10 +49,12 @@ export async function researcherNode(
   stream.progress("🐙 Extracting GitHub search queries…");
   let searchQueries: string[] = [];
   try {
-    const keywordMessages = [
-      sysMsg(KEYWORD_PROMPT),
-      userMsg(lastUserMsg),
-    ];
+    const keywordMessages = buildMessages({
+      systemPrompt: KEYWORD_PROMPT,
+      userQuestion: lastUserMsg,
+      maxSystemChars: 400,
+      maxWorkspaceChars: 0,
+    });
     const raw = await callModel(model, keywordMessages, null, token, "researcher-keywords");
     searchQueries = raw
       .split("\n")
@@ -141,14 +126,15 @@ export async function researcherNode(
     fullSystemPrompt = fullSystemPrompt.slice(0, 10000) + "\n[… system prompt truncated to fit context window]";
   }
 
-  const messages: vscode.LanguageModelChatMessage[] = [sysMsg(fullSystemPrompt)];
-  // Only add the last user message to keep context small
-  if (lastUserMsg) {
-    messages.push(userMsg(lastUserMsg));
-  }
+  const messages = buildMessages({
+    systemPrompt: fullSystemPrompt,
+    userQuestion: lastUserMsg || "Analyze the research topic",
+    maxSystemChars: 8000,
+    maxWorkspaceChars: 0, // workspace context already embedded above
+  });
 
-  stream.markdown(`#### 📝 Analysis\n\n`);
-  const response = await callModel(model, truncateMessages(messages, safeBudget(model)), stream, token, "researcher");
+  stream.markdown(`#### \u{1F4DD} Analysis\n\n`);
+  const response = await callModel(model, messages, stream, token, "researcher");
 
   // Cap what we store in state.messages to avoid bloating context for downstream agents
   const cappedResponse = response.length > 1500

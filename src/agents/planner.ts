@@ -4,17 +4,16 @@
 
 import * as vscode from "vscode";
 import { AgentState, AgentMessage } from "../graph/state";
-import { callModel, sysMsg, userMsg, assistantMsg, truncateMessages, safeBudget, capContext } from "./base";
+import { callModel, buildMessages } from "./base";
 
 const SYSTEM_PROMPT = `You are the Planner agent on a multi-agent coding team.
 
-Your job is to take a user's request and break it into a clear, numbered
-step-by-step plan that the other agents (coder, researcher, reviewer) can follow.
+Break the user's request into a clear, numbered step-by-step plan.
 
 Rules:
 1. Each step should be concrete and actionable.
-2. Identify which agent should own each step (coder / researcher / reviewer).
-3. Keep the plan concise — no more than 8 steps.
+2. Identify which agent owns each step (coder / researcher / reviewer).
+3. Keep the plan concise - no more than 8 steps.
 4. Format as a numbered markdown list.`;
 
 export async function plannerNode(
@@ -25,24 +24,20 @@ export async function plannerNode(
 ): Promise<Partial<AgentState>> {
   stream.markdown(
     `---\n\n` +
-    `#### 📋 Planner — Breaking down your task\n\n`
+    `#### \u{1F4CB} Planner \u2014 Breaking down your task\n\n`
   );
 
-  const messages: vscode.LanguageModelChatMessage[] = [sysMsg(SYSTEM_PROMPT)];
+  const lastUserMsg = [...state.messages].reverse().find(m => m.role === "user")?.content ?? "";
 
-  if (state.workspaceContext) {
-    messages.push(userMsg(`[WORKSPACE CONTEXT]\n${capContext(state.workspaceContext, 2000)}`));
-  }
+  const messages = buildMessages({
+    systemPrompt: SYSTEM_PROMPT,
+    workspaceContext: state.workspaceContext,
+    userQuestion: lastUserMsg,
+    maxSystemChars: 600,
+    maxWorkspaceChars: 1200,
+  });
 
-  for (const msg of state.messages) {
-    if (msg.role === "user") {
-      messages.push(userMsg(msg.content));
-    } else if (msg.role === "assistant") {
-      messages.push(assistantMsg(msg.content));
-    }
-  }
-
-  const response = await callModel(model, truncateMessages(messages, safeBudget(model)), stream, token, "planner");
+  const response = await callModel(model, messages, stream, token, "planner");
 
   // Parse numbered lines
   const lines = response

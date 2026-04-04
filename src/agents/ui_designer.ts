@@ -1,19 +1,21 @@
+/**
+ * UI Designer agent — designs user interfaces and components.
+ */
+
 import * as vscode from "vscode";
 import { AgentState, AgentMessage, postAgentMessage, getMessagesFor } from "../graph/state";
-import { callModel, selectModel, MODELS, sysMsg, userMsg, assistantMsg, truncateMessages, safeBudget, capContext } from "./base";
+import { callModel, selectModel, MODELS, buildMessages, capContext } from "./base";
 import { logger } from "../utils/logger";
 
 const SYSTEM_PROMPT = `You are a senior UI/UX designer and front-end architect.
-Your job is to design user interfaces: components, layouts, colour palettes,
-responsive behaviour, accessibility, and visual hierarchy.
+Design user interfaces: components, layouts, colours, responsive behaviour, accessibility.
 
 When designing:
-1. Start with a brief design rationale (2-3 sentences).
-2. Provide the markup / component code (HTML, JSX, React, Vue, Svelte, etc.).
-3. Include styling (CSS / Tailwind / styled-components) that is production-ready.
-4. Note any accessibility considerations (ARIA, focus management, contrast).
-5. If an existing code artefact was supplied by the Coder agent, make sure your
-   design integrates with it seamlessly.
+1. Brief design rationale (2-3 sentences).
+2. Markup/component code (HTML, JSX, React, Vue, Svelte, etc.).
+3. Styling (CSS/Tailwind) that is production-ready.
+4. Accessibility notes (ARIA, focus, contrast).
+5. Integrate with any existing code artefact.
 
 Output well-formatted Markdown with fenced code blocks.`;
 
@@ -23,7 +25,7 @@ export async function uiDesigner(
   stream: vscode.ChatResponseStream,
   token: vscode.CancellationToken,
 ): Promise<Partial<AgentState>> {
-  stream.markdown(`\n\n---\n#### 🎨 UI Designer — Crafting the interface\n\n`);
+  stream.markdown(`\n\n---\n#### \u{1F3A8} UI Designer \u{2014} Crafting the interface\n\n`);
 
   // Prefer Gemini 3 Pro for design work
   const designResult = await selectModel(MODELS.gemini3Pro);
@@ -35,56 +37,55 @@ export async function uiDesigner(
     logger.fallback("ui_designer", "gemini-3-pro", model.name);
   }
 
-  // Build context from inter-agent messages
+  // Build context block
   let contextBlock = "";
   const msgs = getMessagesFor(state, "ui_designer");
   if (msgs.length > 0) {
     contextBlock = "\n\n## Context from other agents\n" +
-      msgs.map(m => `[From ${m.from}]: ${m.content}`).join("\n");
+      msgs.slice(0, 3).map(m => `[From ${m.from}]: ${capContext(m.content, 300)}`).join("\n");
   }
 
-  // Also read any existing code artefact
   const existingCode = state.artifacts["last_code"] ?? "";
   if (existingCode) {
-    contextBlock += `\n\n## Existing code to integrate with\n\`\`\`\n${existingCode}\n\`\`\``;
+    contextBlock += `\n\n## Existing code\n\`\`\`\n${capContext(existingCode, 1000)}\n\`\`\``;
   }
 
   const plan = state.artifacts["plan"] ?? "";
   if (plan) {
-    contextBlock += `\n\n## Project plan\n${plan}`;
+    contextBlock += `\n\n## Plan\n${capContext(plan, 600)}`;
   }
 
-  let fullSystemPrompt = SYSTEM_PROMPT + contextBlock;
-  if (state.workspaceContext) {
-    fullSystemPrompt += `\n\n${capContext(state.workspaceContext, 2000)}`;
-  }
+  const sysPrompt = SYSTEM_PROMPT + contextBlock;
+  const lastUserMsg = [...state.messages].reverse().find(m => m.role === "user")?.content ?? "";
 
-  const messages: vscode.LanguageModelChatMessage[] = [sysMsg(fullSystemPrompt)];
-  for (const msg of state.messages) {
-    if (msg.role === "user") {
-      messages.push(userMsg(msg.content));
-    } else if (msg.role === "assistant") {
-      messages.push(assistantMsg(msg.content));
-    }
-  }
+  const messages = buildMessages({
+    systemPrompt: sysPrompt,
+    workspaceContext: state.workspaceContext,
+    userQuestion: lastUserMsg || "Design the UI",
+    maxSystemChars: 4000,
+    maxWorkspaceChars: 800,
+  });
 
-  const response = await callModel(activeModel, truncateMessages(messages, safeBudget(activeModel)), stream, token, "ui_designer");
+  const response = await callModel(activeModel, messages, stream, token, "ui_designer");
+
+  const cappedResponse = response.length > 1500
+    ? response.slice(0, 1500) + "\n[... design truncated in state]"
+    : response;
 
   const newMessage: AgentMessage = {
     role: "assistant",
-    content: response,
+    content: cappedResponse,
     name: "ui_designer",
   };
 
-  // Post design spec to message bus for coder and tester
-  postAgentMessage(state, "ui_designer", "coder", "info", response);
+  postAgentMessage(state, "ui_designer", "coder", "info", capContext(response, 1000));
   postAgentMessage(state, "ui_designer", "test_gen", "info",
-    `UI design was produced. Here are the components to consider for visual regression / snapshot tests:\n${response}`);
+    `UI design produced. Components for tests:\n${capContext(response, 800)}`);
   logger.agentMessage("ui_designer", "*", "Design spec posted to message bus");
 
   return {
     messages: [newMessage],
-    artifacts: { ui_design: response, last_code: response },
+    artifacts: { ui_design: cappedResponse, last_code: cappedResponse },
     nextAgent: "supervisor",
   };
 }
