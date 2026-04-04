@@ -60,10 +60,13 @@ export interface AgentState {
 
   /** Error log — records failures and fallback activations. */
   errors: string[];
+
+  /** Workspace context snapshot — project structure, active file, etc. */
+  workspaceContext: string;
 }
 
 /** Create a blank initial state with the user's first message. */
-export function createInitialState(userMessage: string): AgentState {
+export function createInitialState(userMessage: string, workspaceContext: string = ""): AgentState {
   return {
     messages: [{ role: "user", content: userMessage }],
     nextAgent: "",
@@ -75,6 +78,7 @@ export function createInitialState(userMessage: string): AgentState {
     reviewVerdict: "pending",
     agentComms: [],
     errors: [],
+    workspaceContext,
   };
 }
 

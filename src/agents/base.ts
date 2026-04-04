@@ -163,3 +163,62 @@ export function userMsg(content: string): vscode.LanguageModelChatMessage {
 export function assistantMsg(content: string): vscode.LanguageModelChatMessage {
   return vscode.LanguageModelChatMessage.Assistant(content);
 }
+
+// ── Message truncation ───────────────────────────────────────────────
+
+/**
+ * Estimate token count (rough: 1 token ≈ 4 chars).
+ * Real tokenisers vary, but this keeps us safely under limits.
+ */
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+/**
+ * Truncate a message list to fit within a token budget.
+ * Always keeps the system message (index 0) and the last user message.
+ * Trims from the middle of the conversation.
+ */
+export function truncateMessages(
+  messages: vscode.LanguageModelChatMessage[],
+  maxTokens: number = 28000
+): vscode.LanguageModelChatMessage[] {
+  // Estimate total tokens
+  let totalTokens = 0;
+  const tokenCounts = messages.map(m => {
+    // Access the text content — LanguageModelChatMessage stores parts
+    const text = (m as any).content?.[0]?.value ?? (m as any).content ?? "";
+    const count = estimateTokens(typeof text === "string" ? text : JSON.stringify(text));
+    totalTokens += count;
+    return count;
+  });
+
+  if (totalTokens <= maxTokens) { return messages; }
+
+  logger.warn("truncation", `Messages ~${totalTokens} tokens, trimming to ~${maxTokens}`);
+
+  // Always keep: first (system) + last (latest user prompt)
+  const keep = new Set([0, messages.length - 1]);
+  let budget = maxTokens - tokenCounts[0] - tokenCounts[messages.length - 1];
+
+  // Fill from the end backwards (recent context is most valuable)
+  for (let i = messages.length - 2; i > 0; i--) {
+    if (budget - tokenCounts[i] > 0) {
+      keep.add(i);
+      budget -= tokenCounts[i];
+    } else {
+      break;
+    }
+  }
+
+  const trimmed = messages.filter((_, i) => keep.has(i));
+
+  // Insert a notice so the model knows context was trimmed
+  if (trimmed.length < messages.length) {
+    const dropped = messages.length - trimmed.length;
+    trimmed.splice(1, 0, userMsg(`[Note: ${dropped} earlier messages were trimmed to fit context window]`));
+  }
+
+  logger.info("truncation", `Kept ${trimmed.length}/${messages.length} messages`);
+  return trimmed;
+}

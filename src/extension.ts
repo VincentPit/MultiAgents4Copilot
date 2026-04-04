@@ -21,6 +21,7 @@ import { reviewerNode } from "./agents/reviewer";
 import { uiDesigner } from "./agents/ui_designer";
 import { testGen } from "./agents/tester";
 import { logger } from "./utils/logger";
+import { getWorkspaceSnapshot, formatSnapshotForLLM } from "./utils/workspace";
 
 const PARTICIPANT_ID = "multi-agent-copilot.team";
 
@@ -64,14 +65,18 @@ const handler: vscode.ChatRequestHandler = async (
     return;
   }
 
-  // 2. Slash command → direct single-agent mode
+  // 2. Gather workspace context so agents can "see" the codebase
+  const snapshot = await getWorkspaceSnapshot();
+  const workspaceCtx = formatSnapshotForLLM(snapshot);
+
+  // 3. Slash command → direct single-agent mode
   if (request.command) {
-    await handleDirectCommand(request, model, stream, token);
+    await handleDirectCommand(request, model, stream, token, workspaceCtx);
     return;
   }
 
-  // 3. Full graph execution
-  await runGraph(request.prompt, model, stream, token);
+  // 4. Full graph execution
+  await runGraph(request.prompt, model, stream, token, workspaceCtx);
 };
 
 // ── Direct command handler ────────────────────────────────────────────
@@ -80,9 +85,10 @@ async function handleDirectCommand(
   request: vscode.ChatRequest,
   model: vscode.LanguageModelChat,
   stream: vscode.ChatResponseStream,
-  token: vscode.CancellationToken
+  token: vscode.CancellationToken,
+  workspaceCtx: string
 ): Promise<void> {
-  const state = createInitialState(request.prompt);
+  const state = createInitialState(request.prompt, workspaceCtx);
   const command = request.command!;
 
   const commandToAgent: Record<string, string> = {
@@ -128,9 +134,10 @@ async function runGraph(
   prompt: string,
   model: vscode.LanguageModelChat,
   stream: vscode.ChatResponseStream,
-  token: vscode.CancellationToken
+  token: vscode.CancellationToken,
+  workspaceCtx: string
 ): Promise<void> {
-  const state = createInitialState(prompt);
+  const state = createInitialState(prompt, workspaceCtx);
 
   const graph = buildGraph({
     nodes: AGENT_NODES,

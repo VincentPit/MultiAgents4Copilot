@@ -4,7 +4,7 @@
 
 import * as vscode from "vscode";
 import { AgentState, AgentMessage, postAgentMessage, getMessagesFor } from "../graph/state";
-import { callModel, sysMsg, userMsg, assistantMsg } from "./base";
+import { callModel, sysMsg, userMsg, assistantMsg, truncateMessages } from "./base";
 import { logger } from "../utils/logger";
 
 const SYSTEM_PROMPT = `You are the Coder agent — an expert software engineer.
@@ -33,6 +33,11 @@ export async function coderNode(
 
   let systemPrompt = SYSTEM_PROMPT;
 
+  // Inject workspace context so coder can see the actual files
+  if (state.workspaceContext) {
+    systemPrompt += `\n\n${state.workspaceContext}`;
+  }
+
   if (state.plan.length > 0) {
     systemPrompt += `\n\n## Current Plan\n${state.plan.join("\n")}`;
   }
@@ -56,7 +61,7 @@ export async function coderNode(
     }
   }
 
-  const response = await callModel(model, messages, stream, token, "coder");
+  const response = await callModel(model, truncateMessages(messages), stream, token, "coder");
 
   // Post code to the message bus so other agents can read it
   postAgentMessage(state, "coder", "*", "info", response);

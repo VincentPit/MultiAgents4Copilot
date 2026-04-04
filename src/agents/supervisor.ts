@@ -5,7 +5,7 @@
 
 import * as vscode from "vscode";
 import { AgentState } from "../graph/state";
-import { callModel, sysMsg, userMsg, assistantMsg } from "./base";
+import { callModel, sysMsg, userMsg, assistantMsg, truncateMessages } from "./base";
 import { logger } from "../utils/logger";
 
 const SYSTEM_PROMPT = `You are the Supervisor of a multi-agent coding team.
@@ -42,6 +42,11 @@ export async function supervisorNode(
   // Build the conversation context for the supervisor
   const messages: vscode.LanguageModelChatMessage[] = [sysMsg(SYSTEM_PROMPT)];
 
+  // Inject workspace context so supervisor knows about the codebase
+  if (state.workspaceContext) {
+    messages.push(userMsg(`[WORKSPACE CONTEXT]\n${state.workspaceContext}`));
+  }
+
   for (const msg of state.messages) {
     if (msg.role === "user") {
       messages.push(userMsg(msg.content));
@@ -54,7 +59,7 @@ export async function supervisorNode(
   messages.push(userMsg("Which agent should act next? Reply with ONE word only."));
 
   // Don't stream supervisor reasoning to the user (pass null)
-  const response = await callModel(model, messages, null, token, "supervisor");
+  const response = await callModel(model, truncateMessages(messages, 12000), null, token, "supervisor");
   const decision = response.trim().toLowerCase().replace(/[^a-z]/g, "");
 
   const valid = new Set(["planner", "coder", "researcher", "reviewer", "ui_designer", "test_gen", "finish"]);

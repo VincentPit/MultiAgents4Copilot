@@ -5,7 +5,7 @@
 
 import * as vscode from "vscode";
 import { AgentState, AgentMessage, postAgentMessage } from "../graph/state";
-import { callModel, sysMsg, userMsg, assistantMsg } from "./base";
+import { callModel, sysMsg, userMsg, assistantMsg, truncateMessages } from "./base";
 import { logger } from "../utils/logger";
 import {
   searchGitHubRepos,
@@ -128,6 +128,9 @@ export async function researcherNode(
   if (allResults && allResults.repos.length > 0) {
     fullSystemPrompt += repoContextForLLM(allResults);
   }
+  if (state.workspaceContext) {
+    fullSystemPrompt += `\n\n${state.workspaceContext}`;
+  }
 
   const messages: vscode.LanguageModelChatMessage[] = [sysMsg(fullSystemPrompt)];
   for (const msg of state.messages) {
@@ -139,7 +142,7 @@ export async function researcherNode(
   }
 
   stream.markdown(`#### 📝 Analysis\n\n`);
-  const response = await callModel(model, messages, stream, token, "researcher");
+  const response = await callModel(model, truncateMessages(messages), stream, token, "researcher");
 
   const newMessage: AgentMessage = {
     role: "assistant",
