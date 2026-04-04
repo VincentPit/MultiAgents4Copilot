@@ -2,10 +2,10 @@
   "name": "multi-agent-copilot",
   "displayName": "Multi-Agent Copilot",
   "description": "Graph-based multi-agent system inside the Copilot chat panel",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "stephenlee",
   "engines": {
-    "vscode": "^1.93.0"
+    "vscode": "^1.96.0"
   },
   "categories": [
     "AI",
@@ -57,11 +57,16 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "lint": "eslint src --ext ts"
+    "lint": "eslint src --ext ts",
+    "package": "vsce package"
   },
   "devDependencies": {
-    "@types/node": "^20.0.0",
-    "@types/vscode": "^1.93.0",
-    "typescript": "^5.5.0"
+    "@types/node": "^22.10.0",
+    "@types/vscode": "^1.96.0",
+    "@typescript-eslint/eslint-plugin": "^8.18.0",
+    "@typescript-eslint/parser": "^8.18.0",
+    "@vscode/vsce": "^3.2.0",
+    "eslint": "^9.16.0",
+    "typescript": "^5.7.0"
   }
 }

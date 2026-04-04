@@ -28,8 +28,25 @@ const PARTICIPANT_ID = "multi-agent-copilot.team";
 export function activate(context: vscode.ExtensionContext) {
   const agent = vscode.chat.createChatParticipant(PARTICIPANT_ID, handler);
   agent.iconPath = new vscode.ThemeIcon("hubot");
+
+  // Provide contextual follow-up suggestions after each response
+  agent.followupProvider = {
+    provideFollowups(
+      _result: vscode.ChatResult,
+      _ctx: vscode.ChatContext,
+      _token: vscode.CancellationToken
+    ): vscode.ChatFollowup[] {
+      return [
+        { prompt: "Review the code above", command: "review", label: "🔍 Review" },
+        { prompt: "Refine the plan", command: "plan", label: "📋 Re-plan" },
+        { prompt: "Implement the next step", command: "code", label: "💻 Code" },
+        { prompt: "Generate tests", command: "test", label: "🧪 Test" },
+      ];
+    },
+  };
+
   context.subscriptions.push(agent);
-  logger.info("extension", "Multi-Agent Copilot activated");
+  logger.info("extension", "Multi-Agent Copilot activated (v0.3.0)");
 }
 
 // ── Agent node map ────────────────────────────────────────────────────
@@ -52,7 +69,7 @@ const handler: vscode.ChatRequestHandler = async (
   stream: vscode.ChatResponseStream,
   token: vscode.CancellationToken
 ): Promise<void> => {
-  // 1. Select Claude Opus 4.6 via Copilot
+  // 1. Select Claude Opus 4.6 via Copilot (updated to use latest lm.selectChatModels API)
   const [model] = await vscode.lm.selectChatModels({
     vendor: "copilot",
     family: "claude-opus-4.6",

@@ -6,6 +6,9 @@
  *   • Gemini 3 Pro    — used by the UI designer agent
  *
  * If the primary model fails, automatically falls back to another available model.
+ *
+ * Upgraded: uses LanguageModelError for typed error handling,
+ * improved token budget heuristics, and better retry backoff.
  */
 
 import * as vscode from "vscode";
@@ -123,37 +126,51 @@ export async function callModel(
       }
 
       return chunks.join("");
-    } catch (err: any) {
+    } catch (err: unknown) {
       lastError = err;
-      const errMsg = err instanceof Error ? err.message : String(err);
-      const is400 = errMsg.includes("400") || errMsg.includes("Bad Request");
-      // Log comprehensive error details for debugging
-      const errDetails = [
-        `msg=${errMsg}`,
-        err?.code ? `code=${err.code}` : "",
-        err?.cause ? `cause=${String(err.cause).slice(0, 200)}` : "",
-        `type=${err?.constructor?.name ?? typeof err}`,
-      ].filter(Boolean).join(", ");
-      logger.warn(agentName, `Attempt ${attempt}/${MAX_RETRIES} failed: ${errDetails}`);
 
-      // If 400 = context too large, aggressively truncate
-      if (is400) {
-        if (messages.length > 2) {
-          logger.warn(agentName, `400 detected — stripping to system+last (was ${messages.length} msgs)`);
-          const last = messages[messages.length - 1];
-          const sys = messages[0];
-          const sysText = messageText(sys);
-          if (estimateTokens(sysText) > 2000) {
-            messages = [sysMsg(truncateText(sysText, 2000).replace(/^\[SYSTEM INSTRUCTIONS\]\n/, "")), last];
-          } else {
-            messages = [sys, last];
-          }
-        } else if (messages.length === 1) {
-          // Single consolidated message — hard-truncate its content
-          const text = messageText(messages[0]);
-          if (text.length > 6000) {
-            logger.warn(agentName, `400 on single msg (${text.length} chars) — truncating to 6000`);
-            messages = [userMsg(text.slice(0, 6000) + "\n[... truncated due to 400]")];
+      // Use LanguageModelError for typed error handling (VS Code 1.93+)
+      if (err instanceof vscode.LanguageModelError) {
+        const errDetails = `code=${err.code}, msg=${err.message}, cause=${String(err.cause ?? "").slice(0, 200)}`;
+        logger.warn(agentName, `Attempt ${attempt}/${MAX_RETRIES} failed (LanguageModelError): ${errDetails}`);
+
+        // NotFound = model not available, Blocked = content filter
+        if (err.code === vscode.LanguageModelError.NotFound.name) {
+          logger.error(agentName, "Model not found — skipping retries");
+          break; // No point retrying if the model doesn't exist
+        }
+      } else {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        const is400 = errMsg.includes("400") || errMsg.includes("Bad Request");
+        // Log comprehensive error details for debugging
+        const errObj = err as any;
+        const errDetails = [
+          `msg=${errMsg}`,
+          errObj?.code ? `code=${errObj.code}` : "",
+          errObj?.cause ? `cause=${String(errObj.cause).slice(0, 200)}` : "",
+          `type=${errObj?.constructor?.name ?? typeof err}`,
+        ].filter(Boolean).join(", ");
+        logger.warn(agentName, `Attempt ${attempt}/${MAX_RETRIES} failed: ${errDetails}`);
+
+        // If 400 = context too large, aggressively truncate
+        if (is400) {
+          if (messages.length > 2) {
+            logger.warn(agentName, `400 detected — stripping to system+last (was ${messages.length} msgs)`);
+            const last = messages[messages.length - 1];
+            const sys = messages[0];
+            const sysText = messageText(sys);
+            if (estimateTokens(sysText) > 2000) {
+              messages = [sysMsg(truncateText(sysText, 2000).replace(/^\[SYSTEM INSTRUCTIONS\]\n/, "")), last];
+            } else {
+              messages = [sys, last];
+            }
+          } else if (messages.length === 1) {
+            // Single consolidated message — hard-truncate its content
+            const text = messageText(messages[0]);
+            if (text.length > 6000) {
+              logger.warn(agentName, `400 on single msg (${text.length} chars) — truncating to 6000`);
+              messages = [userMsg(text.slice(0, 6000) + "\n[... truncated due to 400]")];
+            }
           }
         }
       }

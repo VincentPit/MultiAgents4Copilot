@@ -1,22 +1,36 @@
 /**
  * Coder agent — writes, edits, and generates code.
+ *
+ * Unlike a chat-only agent, the coder **actually applies changes to the
+ * workspace** by parsing fenced code blocks from the LLM response and
+ * writing them to disk via `vscode.workspace.fs`.
  */
 
 import * as vscode from "vscode";
 import { AgentState, AgentMessage, postAgentMessage, getMessagesFor } from "../graph/state";
 import { callModel, buildMessages, capContext } from "./base";
 import { logger } from "../utils/logger";
+import { applyCodeToWorkspace } from "../utils/fileWriter";
 
-const SYSTEM_PROMPT = `You are the Coder agent - an expert software engineer.
+const SYSTEM_PROMPT = `You are the Coder agent — an expert software engineer who writes real files.
 
-Write or update code to satisfy the request.
+CRITICAL FORMAT RULES — follow these exactly so your code is applied to the workspace:
 
-Rules:
-1. Produce clean, idiomatic, well-commented code.
-2. If a plan exists, follow it step by step.
-3. Wrap code in fenced code blocks with the correct language tag.
-4. State file paths clearly.
-5. Explain key design decisions briefly.`;
+1. For EVERY file you create or modify, put the relative file path on its own line
+   as a Markdown heading immediately before the fenced code block:
+
+   ### \`src/utils/helper.ts\`
+   \`\`\`typescript
+   // full file contents here
+   \`\`\`
+
+2. Always use the RELATIVE path from the project root (e.g. \`src/foo.ts\`, not \`/Users/.../src/foo.ts\`).
+3. Include the COMPLETE file contents — not just a diff or snippet.
+4. Use the correct language tag on the code fence (typescript, python, etc.).
+5. You may include brief explanations between file blocks, but every code block
+   that should be written MUST be preceded by a heading with the file path.
+6. Produce clean, idiomatic, well-commented code.
+7. If a plan exists, follow it step by step.`;
 
 export async function coderNode(
   state: AgentState,
@@ -62,6 +76,24 @@ export async function coderNode(
   postAgentMessage(state, "coder", "*", "info", response);
   logger.agentMessage("coder", "*", "Code posted to message bus");
 
+  // ── Apply code blocks to the workspace ──────────────────────────────
+  // Parse fenced code blocks from the LLM response, extract file paths,
+  // and write them to disk. This is the key difference from a chat-only agent.
+  let writtenFiles: string[] = [];
+  try {
+    const result = await applyCodeToWorkspace(response, stream);
+    writtenFiles = result.written;
+    if (writtenFiles.length > 0) {
+      logger.info("coder", `Applied ${writtenFiles.length} file(s) to workspace: ${writtenFiles.join(", ")}`);
+    } else {
+      logger.warn("coder", "No file blocks with paths found in LLM response — nothing written to disk");
+    }
+  } catch (err: any) {
+    const errMsg = err?.message ?? String(err);
+    logger.error("coder", `File write failed: ${errMsg}`);
+    stream.markdown(`\n> ⚠️ Failed to apply code changes: ${errMsg}\n`);
+  }
+
   const newMessage: AgentMessage = {
     role: "assistant",
     name: "coder",
@@ -70,6 +102,9 @@ export async function coderNode(
 
   return {
     messages: [newMessage],
-    artifacts: { last_code: response },
+    artifacts: {
+      last_code: response,
+      ...(writtenFiles.length > 0 ? { written_files: writtenFiles.join(", ") } : {}),
+    },
   };
 }
