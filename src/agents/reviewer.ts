@@ -35,7 +35,7 @@ export async function reviewerNode(
     `#### \u{2705} Reviewer \u{2014} Code review (cycle ${cycle}/${MAX_REVIEWS})\n\n`
   );
 
-  const code = capContext(state.artifacts["last_code"] ?? "No code produced yet.", 2000);
+  const code = capContext(state.artifacts["last_code"] ?? "No code produced yet.", 12_000);
   const lastUserMsg = [...state.messages].reverse().find(m => m.role === "user")?.content ?? "";
 
   // Build system prompt with code to review embedded
@@ -44,9 +44,11 @@ export async function reviewerNode(
   const messages = buildMessages({
     systemPrompt: sysPrompt,
     workspaceContext: state.workspaceContext,
+    references: state.references,
     userQuestion: lastUserMsg || "Review the code above",
-    maxSystemChars: 4000,
-    maxWorkspaceChars: 800,
+    maxSystemChars: 16_000,
+    maxWorkspaceChars: 8_000,
+    maxReferencesChars: 10_000,
   });
 
   const response = await callModel(model, messages, stream, token, "reviewer");
@@ -55,8 +57,8 @@ export async function reviewerNode(
   const newCount = state.reviewCount + 1;
   const forceApprove = newCount >= MAX_REVIEWS;
 
-  const cappedResponse = response.length > 1500
-    ? response.slice(0, 1500) + "\n[... review truncated in state]"
+  const cappedResponse = response.length > 6000
+    ? response.slice(0, 6000) + "\n[... review truncated in state]"
     : response;
 
   const newMessage: AgentMessage = {
@@ -84,13 +86,13 @@ export async function reviewerNode(
 
   // Revise
   stream.markdown(`\n\n> \u{1F501} **REVISE** \u{2014} Sending feedback back to \u{1F4BB} **Coder** for another pass\u{2026}\n`);
-  postAgentMessage(state, "reviewer", "coder", "request", capContext(response, 1000));
+  postAgentMessage(state, "reviewer", "coder", "request", capContext(response, 4_000));
   logger.agentMessage("reviewer", "coder", "Revision feedback posted");
   return {
     messages: [newMessage],
     reviewCount: newCount,
     reviewVerdict: "revise",
-    artifacts: { review_feedback: capContext(response, 1000) },
+    artifacts: { review_feedback: capContext(response, 4_000) },
     nextAgent: "coder",
   };
 }

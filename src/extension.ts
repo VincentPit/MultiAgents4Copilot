@@ -13,11 +13,14 @@
 import * as vscode from "vscode";
 import { buildGraph, AgentNode, GraphResult, AGENT_DISPLAY } from "./graph/builder";
 import { createInitialState } from "./graph/state";
+import { createBudget } from "./agents/base";
 import { supervisorNode } from "./agents/supervisor";
 import { plannerNode } from "./agents/planner";
 import { coderNode } from "./agents/coder";
+import { coderPoolNode } from "./agents/coderPool";
 import { researcherNode } from "./agents/researcher";
 import { reviewerNode } from "./agents/reviewer";
+import { integratorNode } from "./agents/integrator";
 import { uiDesigner } from "./agents/ui_designer";
 import { testGen } from "./agents/tester";
 import { logger } from "./utils/logger";
@@ -46,7 +49,7 @@ export function activate(context: vscode.ExtensionContext) {
   };
 
   context.subscriptions.push(agent);
-  logger.info("extension", "Multi-Agent Copilot activated (v0.3.0)");
+  logger.info("extension", "Multi-Agent Copilot activated (v0.6.0)");
 }
 
 // ── Agent node map ────────────────────────────────────────────────────
@@ -55,8 +58,10 @@ const AGENT_NODES: Record<string, AgentNode> = {
   supervisor: supervisorNode,
   planner: plannerNode,
   coder: coderNode,
+  coder_pool: coderPoolNode,
   researcher: researcherNode,
   reviewer: reviewerNode,
+  integrator: integratorNode,
   ui_designer: uiDesigner,
   test_gen: testGen,
 };
@@ -65,15 +70,19 @@ const AGENT_NODES: Record<string, AgentNode> = {
 
 const handler: vscode.ChatRequestHandler = async (
   request: vscode.ChatRequest,
-  _chatContext: vscode.ChatContext,
+  chatContext: vscode.ChatContext,
   stream: vscode.ChatResponseStream,
   token: vscode.CancellationToken
 ): Promise<void> => {
-  // 1. Select Claude Opus 4.6 via Copilot (updated to use latest lm.selectChatModels API)
-  const [model] = await vscode.lm.selectChatModels({
-    vendor: "copilot",
-    family: "claude-opus-4.6",
-  });
+  // 1. Use the model from the chat request (user's dropdown), fall back to explicit selection
+  let model: vscode.LanguageModelChat | undefined = request.model;
+  if (!model) {
+    const [selected] = await vscode.lm.selectChatModels({
+      vendor: "copilot",
+      family: "claude-opus-4.6",
+    });
+    model = selected;
+  }
 
   if (!model) {
     stream.markdown(
@@ -82,18 +91,25 @@ const handler: vscode.ChatRequestHandler = async (
     return;
   }
 
-  // 2. Gather workspace context so agents can "see" the codebase
+  // 2. Gather workspace context — budget-aware based on model capacity
+  const budget = createBudget(model);
   const snapshot = await getWorkspaceSnapshot();
-  const workspaceCtx = formatSnapshotForLLM(snapshot);
+  const workspaceCtx = formatSnapshotForLLM(snapshot, budget.workspaceChars);
 
-  // 3. Slash command → direct single-agent mode
+  // 3. Resolve user-attached references (#file, #selection)
+  const references = await resolveReferences(request.references ?? [], budget.referencesChars);
+
+  // 4. Format chat history for multi-turn context continuity
+  const chatHistory = formatChatHistory((chatContext as any).history ?? []);
+
+  // 5. Slash command → direct single-agent mode
   if (request.command) {
-    await handleDirectCommand(request, model, stream, token, workspaceCtx);
+    await handleDirectCommand(request, model, stream, token, workspaceCtx, references);
     return;
   }
 
-  // 4. Full graph execution
-  await runGraph(request.prompt, model, stream, token, workspaceCtx);
+  // 6. Full graph execution
+  await runGraph(request.prompt, model, stream, token, workspaceCtx, references, chatHistory);
 };
 
 // ── Direct command handler ────────────────────────────────────────────
@@ -103,14 +119,17 @@ async function handleDirectCommand(
   model: vscode.LanguageModelChat,
   stream: vscode.ChatResponseStream,
   token: vscode.CancellationToken,
-  workspaceCtx: string
+  workspaceCtx: string,
+  references: string = ""
 ): Promise<void> {
   const state = createInitialState(request.prompt, workspaceCtx);
+  state.references = references;
   const command = request.command!;
 
   const commandToAgent: Record<string, string> = {
     plan: "planner",
     code: "coder",
+    build: "coder_pool",
     research: "researcher",
     review: "reviewer",
     design: "ui_designer",
@@ -152,9 +171,13 @@ async function runGraph(
   model: vscode.LanguageModelChat,
   stream: vscode.ChatResponseStream,
   token: vscode.CancellationToken,
-  workspaceCtx: string
+  workspaceCtx: string,
+  references: string = "",
+  chatHistory: string = ""
 ): Promise<void> {
   const state = createInitialState(prompt, workspaceCtx);
+  state.references = references;
+  state.chatHistory = chatHistory;
 
   const graph = buildGraph({
     nodes: AGENT_NODES,
@@ -169,7 +192,9 @@ async function runGraph(
     `|-------|------|\n` +
     `| 🧠 Supervisor | Routes your request to the right specialist |\n` +
     `| 📋 Planner | Breaks complex tasks into steps |\n` +
-    `| 💻 Coder | Writes & edits code |\n` +
+    `| 💻 Coder | Writes & edits code (single domain) |\n` +
+    `| 🏢 Engineering Team | Spawns parallel domain coders for large projects |\n` +
+    `| 🔗 Integration Engineer | Merges parallel outputs into cohesive code |\n` +
     `| 🔍 Researcher | Explains concepts & finds information |\n` +
     `| 🎨 UI Designer | Designs interfaces & components (Gemini 3 Pro) |\n` +
     `| 🧪 Test Generator | Creates comprehensive test suites |\n` +
@@ -190,21 +215,38 @@ async function runGraph(
 function renderSummary(stream: vscode.ChatResponseStream, result: GraphResult): void {
   const { agentRuns, totalDurationMs, totalSteps } = result;
 
-  // Build the agent flow pipeline (skip supervisor from the visual flow)
+  // Build the agent flow pipeline — show parallel groups with ∥ notation
   const workerRuns = agentRuns.filter((r) => r.name !== "supervisor");
-  const flowLine = workerRuns
-    .map((r) => {
-      const d = AGENT_DISPLAY[r.name] ?? { icon: "⚙️", label: r.name };
-      return `${d.icon} ${d.label}`;
-    })
-    .join("  →  ");
+
+  // Group consecutive parallel runs into batches
+  const flowSegments: string[] = [];
+  let i = 0;
+  while (i < workerRuns.length) {
+    if (workerRuns[i].parallel) {
+      // Collect all consecutive parallel runs
+      const parallelGroup: string[] = [];
+      while (i < workerRuns.length && workerRuns[i].parallel) {
+        const d = AGENT_DISPLAY[workerRuns[i].name] ?? { icon: "⚙️", label: workerRuns[i].name };
+        parallelGroup.push(`${d.icon} ${d.label}`);
+        i++;
+      }
+      flowSegments.push(`⟨${parallelGroup.join(" ∥ ")}⟩`);
+    } else {
+      const d = AGENT_DISPLAY[workerRuns[i].name] ?? { icon: "⚙️", label: workerRuns[i].name };
+      flowSegments.push(`${d.icon} ${d.label}`);
+      i++;
+    }
+  }
+  const flowLine = flowSegments.join("  →  ");
 
   // Build timing breakdown
   const timingRows = workerRuns.map((r) => {
     const d = AGENT_DISPLAY[r.name] ?? { icon: "⚙️", label: r.name };
-    return `| ${d.icon} ${d.label} | ${formatDuration(r.durationMs)} |`;
+    const tag = r.parallel ? " ∥" : "";
+    return `| ${d.icon} ${d.label}${tag} | ${formatDuration(r.durationMs)} |`;
   });
 
+  const parallelCount = workerRuns.filter(r => r.parallel).length;
   const statusEmoji = result.state.status === "completed" ? "✅" : "⚠️";
   const statusLabel = result.state.status === "completed" ? "Completed" : "Stopped";
 
@@ -213,17 +255,120 @@ function renderSummary(stream: vscode.ChatResponseStream, result: GraphResult): 
     `### 📊 Summary\n\n` +
     `**Status:** ${statusEmoji} ${statusLabel}\n\n` +
     `**Agent flow:**\n> ${flowLine || "_(no worker agents ran)_"}\n\n` +
+    (parallelCount > 0
+      ? `> _⟨ ⟩ = parallel group · ∥ = ran concurrently_\n\n`
+      : "") +
     `**Performance:**\n\n` +
     `| Agent | Time |\n` +
     `|-------|------|\n` +
     timingRows.join("\n") + "\n" +
     `| **Total** | **${formatDuration(totalDurationMs)}** |\n\n` +
     `> 🔢 ${totalSteps} graph steps · ` +
-    `${workerRuns.length} agent invocations · ` +
-    `${result.state.reviewCount} review cycles\n`
+    `${workerRuns.length} agent invocations` +
+    (parallelCount > 0 ? ` (${parallelCount} parallel)` : "") +
+    ` · ${result.state.reviewCount} review cycles\n`
   );
 }
+// ── Reference & history resolution ────────────────────────────────────
 
+/**
+ * Resolve user-attached references (#file, #selection, etc.) into text content.
+ * This is how Copilot Chat gives the model visibility into attached files.
+ */
+async function resolveReferences(
+  refs: readonly vscode.ChatPromptReference[],
+  maxChars: number = 40_000
+): Promise<string> {
+  if (refs.length === 0) { return ""; }
+
+  const parts: string[] = [];
+  let totalChars = 0;
+
+  for (const ref of refs) {
+    if (totalChars >= maxChars) { break; }
+
+    try {
+      if (typeof ref.value === "string") {
+        // String reference — include directly
+        const text = `### Reference: ${ref.id}\n${ref.value}`;
+        parts.push(text);
+        totalChars += text.length;
+      } else if (ref.value && typeof (ref.value as vscode.Uri).fsPath === "string") {
+        // Uri reference — read the full file
+        const uri = ref.value as vscode.Uri;
+        const doc = await vscode.workspace.openTextDocument(uri);
+        const content = doc.getText();
+        const relPath = vscode.workspace.asRelativePath(uri);
+        const maxFileChars = Math.min(maxChars - totalChars, 30_000);
+        const cappedContent = content.length > maxFileChars
+          ? content.slice(0, maxFileChars) + "\n[… file truncated]"
+          : content;
+        const text = `### ${relPath}\n\`\`\`${doc.languageId}\n${cappedContent}\n\`\`\``;
+        parts.push(text);
+        totalChars += text.length;
+      } else if (ref.value && (ref.value as vscode.Location).uri) {
+        // Location reference — read the specific range
+        const loc = ref.value as vscode.Location;
+        const doc = await vscode.workspace.openTextDocument(loc.uri);
+        const content = doc.getText(loc.range);
+        const relPath = vscode.workspace.asRelativePath(loc.uri);
+        const text = `### ${relPath} (selection)\n\`\`\`${doc.languageId}\n${content}\n\`\`\``;
+        parts.push(text);
+        totalChars += text.length;
+      } else if (ref.modelDescription) {
+        // Fallback: use the model description
+        const text = `### Reference\n${ref.modelDescription}`;
+        parts.push(text);
+        totalChars += text.length;
+      }
+    } catch {
+      logger.warn("references", `Could not resolve reference: ${ref.id}`);
+    }
+  }
+
+  return parts.join("\n\n");
+}
+
+/**
+ * Format chat history from prior turns for multi-turn context continuity.
+ * This is how Copilot Chat maintains conversation context across turns.
+ */
+function formatChatHistory(
+  history: ReadonlyArray<any>,
+  maxChars: number = 8_000
+): string {
+  if (!history || history.length === 0) { return ""; }
+
+  const parts: string[] = [];
+  let totalChars = 0;
+
+  // Work backwards from most recent to include the most relevant context
+  for (let i = history.length - 1; i >= 0 && totalChars < maxChars; i--) {
+    const turn = history[i];
+    let text: string;
+
+    if ("prompt" in turn) {
+      // ChatRequestTurn — user's message
+      text = `**User**: ${turn.prompt}`;
+    } else if ("response" in turn) {
+      // ChatResponseTurn — extract markdown from response parts
+      const responseParts = turn.response as any[];
+      const responseText = responseParts
+        ?.map((p: any) => p?.value?.value ?? p?.value ?? "")
+        .filter(Boolean)
+        .join("") ?? "[response]";
+      text = `**Assistant**: ${responseText.slice(0, 2_000)}`;
+    } else {
+      continue;
+    }
+
+    if (totalChars + text.length > maxChars) { break; }
+    parts.unshift(text);
+    totalChars += text.length;
+  }
+
+  return parts.length > 0 ? `## Prior Conversation\n\n${parts.join("\n\n")}` : "";
+}
 // ── Helpers ───────────────────────────────────────────────────────────
 
 function formatDuration(ms: number): string {

@@ -1,33 +1,120 @@
 /**
- * Router — decides which node to execute next based on the state.
+ * Router — decides which node(s) to execute next based on the state.
+ *
+ * Supports three routing modes:
+ *   1. Single dispatch   — supervisor says "coder" → one agent runs
+ *   2. Parallel fan-out  — supervisor says "researcher,coder" → both run concurrently
+ *   3. Plan-driven       — planner's steps drive which agents run and in what order
  */
 
 import { AgentState } from "./state";
 import { logger } from "../utils/logger";
 
-/** Map the supervisor's decision to a graph node name. */
-export function routeSupervisor(state: AgentState): string {
-  const decision = state.nextAgent.toLowerCase().trim();
+/** Routing result — one or more agents to execute (parallel when > 1). */
+export interface RouteResult {
+  agents: string[];      // agent names to run
+  parallel: boolean;     // true = run concurrently, false = run first one
+  done: boolean;         // true = graph should finish
+}
 
-  const valid: Record<string, string> = {
-    planner: "planner",
-    coder: "coder",
-    researcher: "researcher",
-    reviewer: "reviewer",
-    ui_designer: "ui_designer",
-    test_gen: "test_gen",
-    finish: "__end__",
-  };
+const VALID_AGENTS = new Set([
+  "planner", "coder", "coder_pool", "researcher", "reviewer",
+  "ui_designer", "test_gen", "integrator",
+]);
 
-  const next = valid[decision] ?? "__end__";
-  logger.route("supervisor", next);
-  return next;
+/**
+ * Route after the supervisor node.
+ *
+ * The supervisor's `nextAgent` field can be:
+ *   - A single agent name: "coder"
+ *   - Comma-separated for parallel: "researcher,coder"
+ *   - "finish" to end the graph
+ *
+ * Also checks `pendingAgents` for queued parallel work.
+ */
+export function routeSupervisor(state: AgentState): RouteResult {
+  // Check for explicit parallel dispatch via pendingAgents
+  if (state.pendingAgents.length > 0) {
+    const valid = state.pendingAgents.filter(a => VALID_AGENTS.has(a));
+    if (valid.length > 1) {
+      logger.route("supervisor", `parallel: [${valid.join(", ")}]`);
+      return { agents: valid, parallel: true, done: false };
+    }
+    if (valid.length === 1) {
+      logger.route("supervisor", valid[0]);
+      return { agents: valid, parallel: false, done: false };
+    }
+  }
+
+  // Parse the nextAgent field — may be comma-separated
+  const raw = state.nextAgent.toLowerCase().trim();
+  const parts = raw.split(/[,\s+]+/).map(s => s.trim()).filter(Boolean);
+
+  // Check for finish
+  if (parts.includes("finish") || parts.length === 0) {
+    logger.route("supervisor", "__end__");
+    return { agents: [], parallel: false, done: true };
+  }
+
+  // Validate and collect agents
+  const agents = parts.filter(a => VALID_AGENTS.has(a));
+
+  if (agents.length === 0) {
+    logger.route("supervisor", "__end__ (no valid agents)");
+    return { agents: [], parallel: false, done: true };
+  }
+
+  if (agents.length > 1) {
+    logger.route("supervisor", `parallel: [${agents.join(", ")}]`);
+    return { agents, parallel: true, done: false };
+  }
+
+  logger.route("supervisor", agents[0]);
+  return { agents, parallel: false, done: false };
 }
 
 /** After the reviewer: approve → end, revise → back to coder. */
-export function routeReviewer(state: AgentState): string {
+export function routeReviewer(state: AgentState): RouteResult {
   if (state.status === "completed" || state.reviewVerdict === "approve") {
-    return "__end__";
+    return { agents: [], parallel: false, done: true };
   }
-  return "coder";
+  return { agents: ["coder"], parallel: false, done: false };
+}
+
+/**
+ * Plan-driven routing — parse the planner's steps to extract agent assignments.
+ *
+ * Looks for patterns like:
+ *   "1. (coder) Write the API routes"
+ *   "2. (researcher) Look up OAuth2 best practices"
+ *   "3. (coder, test_gen) Implement and test the auth module"
+ *
+ * Returns the agents assigned to the current plan step.
+ */
+export function routeFromPlan(state: AgentState): RouteResult | null {
+  if (state.plan.length === 0 || state.planStep >= state.plan.length) {
+    return null; // no plan or plan exhausted
+  }
+
+  const step = state.plan[state.planStep];
+  // Match (agent) or (agent1, agent2) at beginning of step
+  const match = step.match(/\(([a-z_,\s]+)\)/i);
+  if (!match) { return null; }
+
+  const agents = match[1]
+    .split(",")
+    .map(a => a.trim().toLowerCase())
+    .filter(a => VALID_AGENTS.has(a));
+
+  if (agents.length === 0) { return null; }
+
+  logger.route("plan-step-" + state.planStep, agents.length > 1
+    ? `parallel: [${agents.join(", ")}]`
+    : agents[0]);
+
+  return {
+    agents,
+    parallel: agents.length > 1,
+    done: false,
+  };
 }

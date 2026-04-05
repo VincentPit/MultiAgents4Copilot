@@ -42,17 +42,17 @@ export async function uiDesigner(
   const msgs = getMessagesFor(state, "ui_designer");
   if (msgs.length > 0) {
     contextBlock = "\n\n## Context from other agents\n" +
-      msgs.slice(0, 3).map(m => `[From ${m.from}]: ${capContext(m.content, 300)}`).join("\n");
+      msgs.slice(0, 3).map(m => `[From ${m.from}]: ${capContext(m.content, 1500)}`).join("\n");
   }
 
   const existingCode = state.artifacts["last_code"] ?? "";
   if (existingCode) {
-    contextBlock += `\n\n## Existing code\n\`\`\`\n${capContext(existingCode, 1000)}\n\`\`\``;
+    contextBlock += `\n\n## Existing code\n\`\`\`\n${capContext(existingCode, 6_000)}\n\`\`\``;
   }
 
   const plan = state.artifacts["plan"] ?? "";
   if (plan) {
-    contextBlock += `\n\n## Plan\n${capContext(plan, 600)}`;
+    contextBlock += `\n\n## Plan\n${capContext(plan, 3_000)}`;
   }
 
   const sysPrompt = SYSTEM_PROMPT + contextBlock;
@@ -61,15 +61,17 @@ export async function uiDesigner(
   const messages = buildMessages({
     systemPrompt: sysPrompt,
     workspaceContext: state.workspaceContext,
+    references: state.references,
     userQuestion: lastUserMsg || "Design the UI",
-    maxSystemChars: 4000,
-    maxWorkspaceChars: 800,
+    maxSystemChars: 12_000,
+    maxWorkspaceChars: 8_000,
+    maxReferencesChars: 10_000,
   });
 
   const response = await callModel(activeModel, messages, stream, token, "ui_designer");
 
-  const cappedResponse = response.length > 1500
-    ? response.slice(0, 1500) + "\n[... design truncated in state]"
+  const cappedResponse = response.length > 6000
+    ? response.slice(0, 6000) + "\n[... design truncated in state]"
     : response;
 
   const newMessage: AgentMessage = {
@@ -78,9 +80,9 @@ export async function uiDesigner(
     name: "ui_designer",
   };
 
-  postAgentMessage(state, "ui_designer", "coder", "info", capContext(response, 1000));
+  postAgentMessage(state, "ui_designer", "coder", "info", capContext(response, 4_000));
   postAgentMessage(state, "ui_designer", "test_gen", "info",
-    `UI design produced. Components for tests:\n${capContext(response, 800)}`);
+    `UI design produced. Components for tests:\n${capContext(response, 4_000)}`);
   logger.agentMessage("ui_designer", "*", "Design spec posted to message bus");
 
   return {

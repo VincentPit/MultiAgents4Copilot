@@ -51,7 +51,7 @@ export async function getWorkspaceSnapshot(): Promise<WorkspaceSnapshot> {
     const content = doc.getText();
     activeFile = {
       path: vscode.workspace.asRelativePath(doc.uri),
-      content: truncate(content, 3000),
+      content: truncate(content, 20_000),
       language: doc.languageId,
     };
   }
@@ -74,7 +74,7 @@ export async function getWorkspaceSnapshot(): Promise<WorkspaceSnapshot> {
   let fileTree = "";
   if (roots.length > 0) {
     try {
-      fileTree = await buildFileTree(vscode.Uri.file(roots[0]), 2);
+      fileTree = await buildFileTree(vscode.Uri.file(roots[0]), 3);
     } catch (err: any) {
       logger.warn("workspace", `File tree scan failed: ${err.message}`);
     }
@@ -113,7 +113,7 @@ async function buildFileTree(root: vscode.Uri, maxDepth: number, indent: string 
 
   const lines: string[] = [];
   let fileCount = 0;
-  const MAX_ENTRIES = 40; // cap to prevent huge trees
+  const MAX_ENTRIES = 80; // cap to prevent huge trees
 
   for (const [name, type] of entries) {
     if (fileCount >= MAX_ENTRIES) {
@@ -143,7 +143,7 @@ async function buildFileTree(root: vscode.Uri, maxDepth: number, indent: string 
  * Convert a workspace snapshot into a text block suitable for
  * injection into an agent's system prompt.
  */
-export function formatSnapshotForLLM(snapshot: WorkspaceSnapshot): string {
+export function formatSnapshotForLLM(snapshot: WorkspaceSnapshot, maxChars: number = 40_000): string {
   const parts: string[] = [];
 
   parts.push("## User's Workspace Context");
@@ -153,31 +153,31 @@ export function formatSnapshotForLLM(snapshot: WorkspaceSnapshot): string {
   }
 
   if (snapshot.fileTree) {
-    // Cap file tree to 1000 chars
-    const tree = snapshot.fileTree.length > 1000
-      ? snapshot.fileTree.slice(0, 1000) + "\n  … (truncated)"
+    const treeMax = Math.min(Math.floor(maxChars * 0.10), 4_000);
+    const tree = snapshot.fileTree.length > treeMax
+      ? snapshot.fileTree.slice(0, treeMax) + "\n  … (truncated)"
       : snapshot.fileTree;
     parts.push(`\n### Project Structure\n\`\`\`\n${tree}\n\`\`\``);
   }
 
-  // Only include the first project metadata file (usually package.json)
-  if (snapshot.projectMeta.length > 0) {
-    const meta = snapshot.projectMeta[0];
-    const content = meta.content.length > 800
-      ? meta.content.slice(0, 800) + "\n… (truncated)"
+  // Include ALL project metadata files (package.json, tsconfig, etc.)
+  for (const meta of snapshot.projectMeta) {
+    const metaMax = Math.min(Math.floor(maxChars * 0.08), 3_000);
+    const content = meta.content.length > metaMax
+      ? meta.content.slice(0, metaMax) + "\n… (truncated)"
       : meta.content;
     parts.push(`\n### ${meta.path}\n\`\`\`\n${content}\n\`\`\``);
   }
 
   if (snapshot.openFiles.length > 0) {
-    const list = snapshot.openFiles.slice(0, 8).map(f => `- ${f.path} (${f.language})`).join("\n");
+    const list = snapshot.openFiles.slice(0, 15).map(f => `- ${f.path} (${f.language})`).join("\n");
     parts.push(`\n### Open files\n${list}`);
   }
 
   if (snapshot.activeFile) {
-    // Cap active file content to keep total small
-    const content = snapshot.activeFile.content.length > 1500
-      ? snapshot.activeFile.content.slice(0, 1500) + "\n// … (truncated)"
+    const activeMax = Math.min(Math.floor(maxChars * 0.40), 15_000);
+    const content = snapshot.activeFile.content.length > activeMax
+      ? snapshot.activeFile.content.slice(0, activeMax) + "\n// … (truncated)"
       : snapshot.activeFile.content;
     parts.push(
       `\n### Active file: ${snapshot.activeFile.path} (${snapshot.activeFile.language})\n` +
@@ -185,10 +185,10 @@ export function formatSnapshotForLLM(snapshot: WorkspaceSnapshot): string {
     );
   }
 
-  // Hard-cap total output to 4000 chars (~1000 tokens)
+  // Budget-aware total cap (default ~40K chars = ~10K tokens)
   const result = parts.join("\n");
-  if (result.length > 4000) {
-    return result.slice(0, 4000) + "\n[… workspace context truncated]";
+  if (result.length > maxChars) {
+    return result.slice(0, maxChars) + "\n[… workspace context truncated]";
   }
   return result;
 }

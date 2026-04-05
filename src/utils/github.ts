@@ -68,7 +68,7 @@ export async function searchGitHubRepos(
     "X-GitHub-Api-Version": "2022-11-28",
   };
   if (token) {
-    headers.Authorization = `Bearer ${token}`;
+    headers["Authorization"] = `Bearer ${token}`;
   }
 
   // Sort by stars so the most established repos come first

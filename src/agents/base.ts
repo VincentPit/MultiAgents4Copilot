@@ -33,6 +33,49 @@ const FALLBACK_ORDER: ModelSpec[] = [
   MODELS.gemini3Pro,
 ];
 
+// ── Context budget ───────────────────────────────────────────────────
+
+/**
+ * Proportional token budget — mirrors how Copilot Chat manages context.
+ * Instead of hardcoded limits, budgets are derived from model.maxInputTokens
+ * and allocated proportionally to system prompt, workspace, references, etc.
+ */
+export interface ContextBudget {
+  /** Total usable tokens for the request. */
+  totalTokens: number;
+  /** Char budget for the system/instruction prompt. */
+  systemChars: number;
+  /** Char budget for workspace context (file tree, project meta, active file). */
+  workspaceChars: number;
+  /** Char budget for user-attached references (#file, #selection). */
+  referencesChars: number;
+  /** Char budget for the user's actual question/prompt. */
+  userMessageChars: number;
+}
+
+/**
+ * Create a context budget based on the model's reported capacity.
+ * Uses model.maxInputTokens to allocate proportionally — this is how
+ * Copilot Chat handles large contexts instead of hardcoded limits.
+ *
+ * For Claude Opus 4.6 (200K tokens): ~360K chars total capacity.
+ * For smaller models: graceful downscaling.
+ */
+export function createBudget(model: vscode.LanguageModelChat): ContextBudget {
+  const maxInput = model.maxInputTokens ?? 30_000;
+  // Use 75% of capacity — leave headroom for output tokens and overhead
+  const usable = Math.min(Math.floor(maxInput * 0.75), 120_000);
+  const toChars = (pct: number) => Math.floor(usable * pct * 4);
+
+  return {
+    totalTokens: usable,
+    systemChars: toChars(0.20),       // 20% for system prompt
+    workspaceChars: toChars(0.30),    // 30% for workspace snapshot
+    referencesChars: toChars(0.30),   // 30% for attached references
+    userMessageChars: toChars(0.20),  // 20% for user message + history
+  };
+}
+
 // ── Model selection with fallback ────────────────────────────────────
 
 /**
@@ -87,12 +130,30 @@ const MAX_RETRIES = 3;
  * Uses model.maxInputTokens if available, otherwise defaults conservatively.
  */
 export function safeBudget(model: vscode.LanguageModelChat): number {
-  const reported = (model as any).maxInputTokens;
+  const reported = model.maxInputTokens;
   if (typeof reported === "number" && reported > 0) {
-    // Use 50% of reported to leave generous room — Copilot API is strict
-    return Math.min(Math.floor(reported * 0.5), 12000);
+    // Use 80% of reported — modern Copilot models handle large context well
+    return Math.min(Math.floor(reported * 0.80), 100_000);
   }
-  return 8000; // conservative default for Copilot API
+  return 30_000; // generous default for Copilot API models
+}
+
+/**
+ * Count tokens accurately using the model's built-in tokenizer.
+ * Falls back to chars/4 estimate if model.countTokens is unavailable.
+ * This is the same approach Copilot Chat uses for budget validation.
+ */
+export async function countTokens(
+  model: vscode.LanguageModelChat,
+  text: string | vscode.LanguageModelChatMessage,
+  token?: vscode.CancellationToken
+): Promise<number> {
+  try {
+    return await model.countTokens(text, token);
+  } catch {
+    const str = typeof text === "string" ? text : "";
+    return Math.ceil(str.length / 4);
+  }
 }
 
 /**
@@ -222,7 +283,7 @@ export async function callModel(
 // ── Message builders ─────────────────────────────────────────────────
 
 /** Cap a workspace context string to a safe size for injection into prompts. */
-export function capContext(ctx: string, maxChars: number = 2000): string {
+export function capContext(ctx: string, maxChars: number = 20_000): string {
   if (ctx.length <= maxChars) { return ctx; }
   return ctx.slice(0, maxChars) + "\n[… context truncated to fit]";
 }
@@ -251,22 +312,34 @@ export function assistantMsg(content: string): vscode.LanguageModelChatMessage {
 export function buildMessages(opts: {
   systemPrompt: string;
   workspaceContext?: string;
+  references?: string;
+  chatHistory?: string;
   userQuestion: string;
   maxSystemChars?: number;
   maxWorkspaceChars?: number;
+  maxReferencesChars?: number;
+  maxTotalChars?: number;
 }): vscode.LanguageModelChatMessage[] {
-  const maxSys = opts.maxSystemChars ?? 1500;
-  const maxWs = opts.maxWorkspaceChars ?? 1200;
+  const maxSys = opts.maxSystemChars ?? 8_000;
+  const maxWs = opts.maxWorkspaceChars ?? 12_000;
+  const maxRefs = opts.maxReferencesChars ?? 10_000;
+  const maxTotal = opts.maxTotalChars ?? 60_000;
 
   let combined = capContext(opts.systemPrompt, maxSys);
+  if (opts.references) {
+    combined += `\n\n---\n[REFERENCES]\n${capContext(opts.references, maxRefs)}`;
+  }
   if (opts.workspaceContext) {
     combined += `\n\n---\n[WORKSPACE]\n${capContext(opts.workspaceContext, maxWs)}`;
+  }
+  if (opts.chatHistory) {
+    combined += `\n\n---\n[CHAT HISTORY]\n${capContext(opts.chatHistory, 4_000)}`;
   }
   combined += `\n\n---\n[USER REQUEST]\n${opts.userQuestion}`;
 
   // Hard-cap the entire combined message
-  if (combined.length > 12000) {
-    combined = combined.slice(0, 12000) + "\n[… truncated]";
+  if (combined.length > maxTotal) {
+    combined = combined.slice(0, maxTotal) + "\n[… truncated]";
   }
 
   return [userMsg(combined)];
@@ -325,7 +398,7 @@ function truncateText(text: string, maxTokens: number): string {
  */
 export function truncateMessages(
   messages: vscode.LanguageModelChatMessage[],
-  maxTokens: number = 8000
+  maxTokens: number = 30_000
 ): vscode.LanguageModelChatMessage[] {
   if (messages.length === 0) { return messages; }
 

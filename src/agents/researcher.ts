@@ -115,21 +115,21 @@ export async function researcherNode(
   }
   // Cap workspace context injected into system prompt to avoid 400s
   if (state.workspaceContext) {
-    const wsCtx = state.workspaceContext.length > 1500
-      ? state.workspaceContext.slice(0, 1500) + "\n[… workspace context truncated]"
+    const wsCtx = state.workspaceContext.length > 8000
+      ? state.workspaceContext.slice(0, 8000) + "\n[… workspace context truncated]"
       : state.workspaceContext;
     fullSystemPrompt += `\n\n${wsCtx}`;
   }
 
-  // Hard-cap the entire system prompt to ~2500 tokens (~10000 chars)
-  if (fullSystemPrompt.length > 10000) {
-    fullSystemPrompt = fullSystemPrompt.slice(0, 10000) + "\n[… system prompt truncated to fit context window]";
+  // Hard-cap the entire system prompt to ~10000 tokens (~40000 chars)
+  if (fullSystemPrompt.length > 40_000) {
+    fullSystemPrompt = fullSystemPrompt.slice(0, 40_000) + "\n[… system prompt truncated to fit context window]";
   }
 
   const messages = buildMessages({
     systemPrompt: fullSystemPrompt,
     userQuestion: lastUserMsg || "Analyze the research topic",
-    maxSystemChars: 8000,
+    maxSystemChars: 20_000,
     maxWorkspaceChars: 0, // workspace context already embedded above
   });
 
@@ -137,8 +137,8 @@ export async function researcherNode(
   const response = await callModel(model, messages, stream, token, "researcher");
 
   // Cap what we store in state.messages to avoid bloating context for downstream agents
-  const cappedResponse = response.length > 1500
-    ? response.slice(0, 1500) + "\n[… research truncated in state]"
+  const cappedResponse = response.length > 6000
+    ? response.slice(0, 6000) + "\n[… research truncated in state]"
     : response;
 
   const newMessage: AgentMessage = {

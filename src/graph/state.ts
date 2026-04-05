@@ -29,16 +29,38 @@ export interface InterAgentMessage {
   timestamp: number;
 }
 
+/** Domain assignment for parallel coder pool. */
+export interface DomainAssignment {
+  /** Unique identifier, e.g. "backend-api", "data-layer". */
+  id: string;
+  /** Human-readable domain name, e.g. "Backend API". */
+  domain: string;
+  /** What this domain coder is responsible for. */
+  description: string;
+  /** File glob patterns this coder owns, e.g. ["src/api/**"]. */
+  filePatterns: string[];
+  /** Interfaces/exports this domain provides to others. */
+  provides: string;
+  /** Interfaces/exports this domain consumes from others. */
+  consumes: string;
+}
+
 /** The central state object for the graph. */
 export interface AgentState {
   /** Full conversation history. */
   messages: AgentMessage[];
 
-  /** Which agent the supervisor chose to run next. */
+  /** Which agent the supervisor chose to run next (single dispatch). */
   nextAgent: string;
+
+  /** Multiple agents to run in parallel (fan-out). */
+  pendingAgents: string[];
 
   /** Step-by-step plan from the planner. */
   plan: string[];
+
+  /** Which plan step is currently being executed (0-based index). */
+  planStep: number;
 
   /** Scratch-pad for intermediate work products. */
   artifacts: Record<string, string>;
@@ -63,6 +85,32 @@ export interface AgentState {
 
   /** Workspace context snapshot — project structure, active file, etc. */
   workspaceContext: string;
+
+  /** User-attached references (#file, #selection) resolved to text content. */
+  references: string;
+
+  /** Formatted prior chat turns for multi-turn context continuity. */
+  chatHistory: string;
+
+  /** Results from terminal commands executed by agents. */
+  terminalResults: TerminalResult[];
+
+  /** Domain assignments for parallel coder pool. */
+  domainAssignments: DomainAssignment[];
+}
+
+/** Result from a terminal command execution. */
+export interface TerminalResult {
+  /** The command that was executed. */
+  command: string;
+  /** Whether it succeeded. */
+  success: boolean;
+  /** stdout output (may be truncated). */
+  stdout: string;
+  /** stderr output (may be truncated). */
+  stderr: string;
+  /** Which agent ran this command. */
+  agent: string;
 }
 
 /** Create a blank initial state with the user's first message. */
@@ -70,7 +118,9 @@ export function createInitialState(userMessage: string, workspaceContext: string
   return {
     messages: [{ role: "user", content: userMessage }],
     nextAgent: "",
+    pendingAgents: [],
     plan: [],
+    planStep: 0,
     artifacts: {},
     reviewCount: 0,
     finalAnswer: "",
@@ -79,6 +129,10 @@ export function createInitialState(userMessage: string, workspaceContext: string
     agentComms: [],
     errors: [],
     workspaceContext,
+    references: "",
+    chatHistory: "",
+    terminalResults: [],
+    domainAssignments: [],
   };
 }
 
@@ -134,6 +188,11 @@ export function mergeState(
   // Errors are appended, not replaced
   if (update.errors) {
     merged.errors = [...current.errors, ...update.errors];
+  }
+
+  // Terminal results are appended, not replaced
+  if (update.terminalResults) {
+    merged.terminalResults = [...current.terminalResults, ...update.terminalResults];
   }
 
   return merged;

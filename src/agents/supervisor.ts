@@ -11,20 +11,40 @@ const SYSTEM_PROMPT = `You are the Supervisor of a multi-agent coding team.
 
 Your team:
   planner - breaks tasks into step-by-step plans
-  coder - writes and edits code
+  coder - writes/edits code for SIMPLE single-domain changes
+  coder_pool - spawns PARALLEL domain coders for complex multi-file projects
   researcher - explains concepts, searches docs
   reviewer - reviews code quality
+  integrator - merges outputs from parallel coders, writes glue code
   ui_designer - designs UI components
-  test_gen - generates tests
+  test_gen - generates tests, writes test files, AND runs them
 
-Rules:
+Capabilities:
+  - coder, coder_pool, and test_gen can WRITE FILES directly to the workspace.
+  - coder, coder_pool, and test_gen can RUN TERMINAL COMMANDS (with user approval).
+  - This means the team can make REAL changes to the codebase.
+
+Routing rules:
 - New complex tasks: start with "planner".
-- After plan exists: route to "coder" or "researcher". NEVER "planner" again.
-- After code is written: route to "reviewer".
+- After plan exists: follow the plan's steps. Route agents listed in the current step.
+- SIMPLE single-file changes: route to "coder".
+- COMPLEX multi-file/multi-domain work (e.g. "build a REST API", "create a project",
+  "refactor the architecture"): route to "coder_pool" instead of "coder".
+- After coder_pool finishes: route to "integrator" to merge domain outputs.
+- After integration and code is complete: route to "reviewer".
+- If tasks need dependencies installed or builds run: route to "coder".
+- If tests need to be written and executed: route to "test_gen".
 - If reviewer approved: respond "FINISH".
 - Simple questions: use "researcher".
 
-Reply with ONLY one word: planner | coder | researcher | reviewer | ui_designer | test_gen | FINISH`;
+PARALLEL EXECUTION:
+  When multiple agents can work INDEPENDENTLY on the current step, list them
+  separated by commas. Example: "researcher,coder" runs both at the same time.
+  Only combine agents whose work does NOT depend on each other.
+
+Reply with one or more agent names (comma-separated for parallel):
+  planner | coder | coder_pool | researcher | reviewer | integrator | ui_designer | test_gen | FINISH
+Examples: "planner", "coder_pool", "researcher,coder", "integrator", "FINISH"`;
 
 export async function supervisorNode(
   state: AgentState,
@@ -47,41 +67,69 @@ export async function supervisorNode(
     `Task: ${state.messages.find(m => m.role === "user")?.content ?? "unknown"}\n` +
     `Agents completed: ${completedAgents.join(", ") || "none"}\n` +
     `Plan exists: ${hasPlan ? "yes" : "no"}\n` +
+    (hasPlan && state.planStep < state.plan.length
+      ? `Current plan step (${state.planStep + 1}/${state.plan.length}): ${state.plan[state.planStep]}\n`
+      : hasPlan ? `All ${state.plan.length} plan steps addressed.\n` : "") +
     `Last output: ${lastSnippet}\n` +
-    `Which agent next? One word only.`;
+    `Which agent(s) next? Use commas for parallel work.`;
 
   const messages = buildMessages({
     systemPrompt: SYSTEM_PROMPT,
     userQuestion: question,
-    maxSystemChars: 600,
+    maxSystemChars: 2_000,
     maxWorkspaceChars: 0,
   });
 
   const response = await callModel(model, messages, null, token, "supervisor");
-  const decision = response.trim().toLowerCase().replace(/[^a-z_]/g, "");
+  const raw = response.trim().toLowerCase();
 
-  const valid = new Set(["planner", "coder", "researcher", "reviewer", "ui_designer", "test_gen", "finish"]);
-  let nextAgent = valid.has(decision) ? decision : "finish";
+  const valid = new Set(["planner", "coder", "coder_pool", "researcher", "reviewer", "ui_designer", "test_gen", "integrator", "finish"]);
 
-  if (nextAgent === "planner" && hasPlan) {
-    logger.warn("supervisor", "Plan already exists, routing to coder instead");
-    nextAgent = "coder";
+  // Parse comma-separated or single agent names
+  const candidates = raw
+    .split(/[,\s]+/)
+    .map(s => s.replace(/[^a-z_]/g, ""))
+    .filter(s => valid.has(s));
+
+  let agents = candidates.length > 0 ? candidates : ["finish"];
+
+  // Don't re-invoke planner if a plan already exists
+  if (hasPlan) {
+    agents = agents.filter(a => a !== "planner");
+    if (agents.length === 0) { agents = ["coder"]; }
   }
+
+  const isFinish = agents.length === 1 && agents[0] === "finish";
+  const nextAgent = agents.join(","); // Store comma-separated for router
 
   logger.route("supervisor", nextAgent);
 
-  if (nextAgent === "finish") {
+  if (isFinish) {
     return { nextAgent: "finish", status: "completed" };
   }
 
-  const icons: Record<string, string> = {
-    planner: "\u{1F4CB}", coder: "\u{1F4BB}", researcher: "\u{1F50D}", reviewer: "\u2705",
-    ui_designer: "\u{1F3A8}", test_gen: "\u{1F9EA}",
-  };
-  const icon = icons[nextAgent] ?? "\u2699\uFE0F";
-  stream.markdown(
-    `\n> \u{1F9E0} **Supervisor** decided: route to ${icon} **${nextAgent.charAt(0).toUpperCase() + nextAgent.slice(1)}**\n\n`
-  );
+  // For multi-dispatch, also set pendingAgents
+  const pendingAgents = agents.length > 1 ? agents : [];
 
-  return { nextAgent };
+  const icons: Record<string, string> = {
+    planner: "\u{1F4CB}", coder: "\u{1F4BB}", coder_pool: "\u{1F3E2}", researcher: "\u{1F50D}", reviewer: "\u2705",
+    ui_designer: "\u{1F3A8}", test_gen: "\u{1F9EA}", integrator: "\u{1F517}",
+  };
+
+  if (agents.length > 1) {
+    const labels = agents.map(a => {
+      const icon = icons[a] ?? "\u2699\uFE0F";
+      return `${icon} **${a.charAt(0).toUpperCase() + a.slice(1)}**`;
+    });
+    stream.markdown(
+      `\n> \u{1F9E0} **Supervisor** decided: parallel dispatch → ${labels.join(" + ")}\n\n`
+    );
+  } else {
+    const icon = icons[agents[0]] ?? "\u2699\uFE0F";
+    stream.markdown(
+      `\n> \u{1F9E0} **Supervisor** decided: route to ${icon} **${agents[0].charAt(0).toUpperCase() + agents[0].slice(1)}**\n\n`
+    );
+  }
+
+  return { nextAgent, pendingAgents };
 }

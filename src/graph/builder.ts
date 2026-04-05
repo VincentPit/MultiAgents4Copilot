@@ -1,13 +1,18 @@
 /**
  * Graph builder — assembles the agent graph and provides an executor.
  *
- * This is a lightweight state-machine executor (no LangGraph dependency).
- * Nodes are async functions; edges are determined by router functions.
+ * This is a DAG executor supporting:
+ *   • Sequential execution — one agent at a time
+ *   • Parallel fan-out    — multiple agents run concurrently (Promise.allSettled)
+ *   • Plan-driven routing — planner output drives which agents execute
+ *   • Conditional edges   — reviewer verdict determines next step
+ *
+ * No LangGraph dependency — lightweight state-machine with parallel support.
  */
 
 import * as vscode from "vscode";
 import { AgentState, mergeState } from "./state";
-import { routeSupervisor, routeReviewer } from "./router";
+import { routeSupervisor, routeReviewer, routeFromPlan, type RouteResult } from "./router";
 import { logger } from "../utils/logger";
 
 /** An agent node: receives state + VS Code LM + chat stream, returns a partial state update. */
@@ -29,6 +34,8 @@ interface GraphConfig {
 export interface AgentRun {
   name: string;
   durationMs: number;
+  /** Whether this agent ran in parallel with others. */
+  parallel?: boolean;
 }
 
 /** Full result returned after the graph completes. */
@@ -44,8 +51,10 @@ export const AGENT_DISPLAY: Record<string, { icon: string; label: string }> = {
   supervisor:  { icon: "🧠", label: "Supervisor" },
   planner:     { icon: "📋", label: "Planner" },
   coder:       { icon: "💻", label: "Coder" },
+  coder_pool:  { icon: "🏢", label: "Engineering Team" },
   researcher:  { icon: "🔍", label: "Researcher" },
   reviewer:    { icon: "✅", label: "Reviewer" },
+  integrator:  { icon: "🔗", label: "Integration Engineer" },
   ui_designer: { icon: "🎨", label: "UI Designer" },
   test_gen:    { icon: "🧪", label: "Test Generator" },
 };
@@ -57,8 +66,106 @@ export function buildGraph(config: GraphConfig) {
   const { nodes, entryPoint, maxSteps } = config;
 
   /**
-   * Execute the graph to completion, streaming intermediate output
-   * back to the Copilot chat panel with rich UI feedback.
+   * Run a single agent node with timing and error handling.
+   */
+  async function runNode(
+    name: string,
+    state: AgentState,
+    model: vscode.LanguageModelChat,
+    stream: vscode.ChatResponseStream,
+    token: vscode.CancellationToken
+  ): Promise<{ update: Partial<AgentState>; durationMs: number; error?: string }> {
+    const nodeFn = nodes[name];
+    if (!nodeFn) {
+      return { update: {}, durationMs: 0, error: `Unknown agent node: ${name}` };
+    }
+
+    const start = Date.now();
+    logger.agentStart(name);
+    try {
+      const update = await nodeFn(state, model, stream, token);
+      const durationMs = Date.now() - start;
+      logger.agentEnd(name, durationMs);
+      return { update, durationMs };
+    } catch (err: any) {
+      const durationMs = Date.now() - start;
+      const errMsg = err?.message ?? String(err);
+      logger.error(name, `Agent failed: ${errMsg}`);
+      return { update: {}, durationMs, error: errMsg };
+    }
+  }
+
+  /**
+   * Execute multiple agents in parallel using Promise.allSettled.
+   * Each agent gets a snapshot of the current state (no cross-contamination).
+   * Results are merged sequentially after all complete.
+   */
+  async function runParallel(
+    agentNames: string[],
+    state: AgentState,
+    model: vscode.LanguageModelChat,
+    stream: vscode.ChatResponseStream,
+    token: vscode.CancellationToken
+  ): Promise<{ mergedUpdate: Partial<AgentState>; runs: AgentRun[]; errors: string[] }> {
+    const labels = agentNames.map(n => {
+      const d = AGENT_DISPLAY[n] ?? { icon: "⚙️", label: n };
+      return `${d.icon} ${d.label}`;
+    });
+
+    stream.markdown(
+      `\n> 🔀 **Parallel execution:** ${labels.join(" + ")}\n\n`
+    );
+
+    // Launch all agents concurrently with the same state snapshot
+    const stateSnapshot = { ...state };
+    const promises = agentNames.map(name =>
+      runNode(name, stateSnapshot, model, stream, token)
+    );
+
+    const results = await Promise.allSettled(promises);
+
+    // Collect results and merge
+    const runs: AgentRun[] = [];
+    const errors: string[] = [];
+    let merged: Partial<AgentState> = {};
+
+    for (let i = 0; i < results.length; i++) {
+      const name = agentNames[i];
+      const result = results[i];
+
+      if (result.status === "fulfilled") {
+        const { update, durationMs, error } = result.value;
+        runs.push({ name, durationMs, parallel: true });
+
+        if (error) {
+          const display = AGENT_DISPLAY[name] ?? { icon: "⚙️", label: name };
+          stream.markdown(`\n> ⚠️ **${display.label}** encountered an error: ${error}\n`);
+          errors.push(`${name}: ${error}`);
+        } else {
+          // Merge this agent's update into the accumulated partial
+          merged = mergePartials(merged, update);
+        }
+      } else {
+        // Promise rejected (shouldn't happen since runNode catches, but just in case)
+        const errMsg = result.reason?.message ?? String(result.reason);
+        errors.push(`${name}: ${errMsg}`);
+        runs.push({ name, durationMs: 0, parallel: true });
+      }
+    }
+
+    stream.markdown(
+      `\n> ✅ **Parallel batch complete:** ${runs.filter(r => !errors.some(e => e.startsWith(r.name))).map(r => {
+        const d = AGENT_DISPLAY[r.name] ?? { icon: "⚙️", label: r.name };
+        return d.icon;
+      }).join(" ")} finished\n\n`
+    );
+
+    return { mergedUpdate: merged, runs, errors };
+  }
+
+  /**
+   * Execute the graph to completion, supporting both sequential
+   * and parallel agent execution.
    */
   async function run(
     initialState: AgentState,
@@ -72,7 +179,7 @@ export function buildGraph(config: GraphConfig) {
     const agentRuns: AgentRun[] = [];
     const graphStart = Date.now();
 
-    // Track consecutive failures to prevent supervisor→agent→fail loops
+    // Track consecutive failures to prevent loops
     const failedAgents = new Set<string>();
 
     while (currentNode !== "__end__" && steps < maxSteps) {
@@ -88,30 +195,17 @@ export function buildGraph(config: GraphConfig) {
       }
 
       const display = AGENT_DISPLAY[currentNode] ?? { icon: "⚙️", label: currentNode };
-
-      // Show progress indicator at top of chat
       stream.progress(`${display.icon} Running ${display.label}…`);
 
-      // Run the node with timing and error handling
-      const nodeStart = Date.now();
-      logger.agentStart(currentNode);
-      let update: Partial<AgentState>;
-      try {
-        update = await nodeFn(state, model, stream, token);
-        // Success — clear this agent from the failed set
-        failedAgents.delete(currentNode);
-      } catch (err: any) {
-        const errMsg = err?.message ?? String(err);
-        logger.error(currentNode, `Agent failed: ${errMsg}`);
-        stream.markdown(`\n\n> ⚠️ **${display.label}** encountered an error: ${errMsg}\n`);
-        state.errors = [...(state.errors ?? []), `${currentNode}: ${errMsg}`];
+      // ── Run the current node ──
+      const { update, durationMs, error } = await runNode(currentNode, state, model, stream, token);
 
-        // Mark this agent as failed
+      if (error) {
+        stream.markdown(`\n\n> ⚠️ **${display.label}** encountered an error: ${error}\n`);
+        state.errors = [...(state.errors ?? []), `${currentNode}: ${error}`];
         failedAgents.add(currentNode);
 
-        // If 2+ agents have failed, or same agent failed, just finish
         if (failedAgents.size >= 2) {
-          logger.warn("graph", `Multiple agents failed (${[...failedAgents].join(", ")}). Finishing.`);
           stream.markdown(`\n\n> ⚠️ Multiple agents failed. Finishing with available results.\n`);
           state.status = "completed";
           currentNode = "__end__";
@@ -119,44 +213,90 @@ export function buildGraph(config: GraphConfig) {
           continue;
         }
 
-        // Skip to supervisor to re-route, but tell it which agent failed
+        // Re-route through supervisor
         state.nextAgent = "supervisor";
         state.errors = [...(state.errors ?? []), `DO_NOT_ROUTE:${currentNode}`];
         currentNode = "supervisor";
         steps++;
         continue;
       }
-      const durationMs = Date.now() - nodeStart;
-      logger.agentEnd(currentNode, durationMs);
 
+      failedAgents.delete(currentNode);
       agentRuns.push({ name: currentNode, durationMs });
       state = mergeState(state, update);
       steps++;
 
-      // Route to next node
-      if (currentNode === "supervisor") {
-        const nextNode = routeSupervisor(state);
-        // If supervisor wants to route to a failed agent, force finish instead
-        if (failedAgents.has(nextNode)) {
-          logger.warn("graph", `Supervisor tried to route to failed agent "${nextNode}". Finishing.`);
-          stream.markdown(`\n\n> ⚠️ Skipping **${nextNode}** (previously failed). Finishing with available results.\n`);
+      // ── Route to next node(s) ──
+      const route = determineRoute(currentNode, state, failedAgents);
+
+      if (route.done) {
+        currentNode = "__end__";
+        if (state.status !== "completed") { state.status = "completed"; }
+        continue;
+      }
+
+      if (route.parallel && route.agents.length > 1) {
+        // ── Parallel fan-out ──
+        const validAgents = route.agents.filter(a => {
+          if (failedAgents.has(a)) {
+            stream.markdown(`\n> ⚠️ Skipping **${a}** (previously failed)\n`);
+            return false;
+          }
+          return nodes[a] != null;
+        });
+
+        if (validAgents.length === 0) {
+          currentNode = "supervisor";
+          continue;
+        }
+
+        if (validAgents.length === 1) {
+          // Degenerate: only one agent left, run sequentially
+          currentNode = validAgents[0];
+          continue;
+        }
+
+        const { mergedUpdate, runs, errors } = await runParallel(
+          validAgents, state, model, stream, token
+        );
+
+        agentRuns.push(...runs);
+        steps += validAgents.length;
+
+        if (errors.length > 0) {
+          state.errors = [...(state.errors ?? []), ...errors];
+          for (const e of errors) {
+            const name = e.split(":")[0];
+            failedAgents.add(name);
+          }
+        }
+
+        state = mergeState(state, mergedUpdate);
+        // Clear pending agents after execution
+        state.pendingAgents = [];
+
+        // After parallel batch, advance plan step if plan-driven
+        if (state.plan.length > 0 && state.planStep < state.plan.length) {
+          state.planStep++;
+        }
+
+        // Route back to supervisor after parallel batch
+        currentNode = "supervisor";
+      } else {
+        // ── Sequential: single next agent ──
+        currentNode = route.agents[0] ?? "supervisor";
+
+        // If supervisor tried to route to a failed agent, finish
+        if (failedAgents.has(currentNode)) {
+          stream.markdown(`\n> ⚠️ Skipping **${currentNode}** (previously failed). Finishing.\n`);
           currentNode = "__end__";
           state.status = "completed";
-        } else {
-          currentNode = nextNode;
         }
-      } else if (currentNode === "reviewer") {
-        currentNode = routeReviewer(state);
-      } else {
-        // All other agents route back to supervisor
-        currentNode = "supervisor";
       }
     }
 
     if (steps >= maxSteps) {
-      stream.markdown(
-        `\n\n> ⚠️ Reached maximum step limit (${maxSteps}). Stopping.\n`
-      );
+      stream.markdown(`\n\n> ⚠️ Reached maximum step limit (${maxSteps}). Stopping.\n`);
       state.status = "completed";
     }
 
@@ -169,4 +309,78 @@ export function buildGraph(config: GraphConfig) {
   }
 
   return { run };
+}
+
+// ── Internal helpers ──────────────────────────────────────────────────
+
+/**
+ * Determine the next route based on which node just executed.
+ * Checks plan-driven routing first, then falls back to supervisor/reviewer routing.
+ */
+function determineRoute(
+  currentNode: string,
+  state: AgentState,
+  failedAgents: Set<string>
+): RouteResult {
+  if (currentNode === "supervisor") {
+    // First check if there's a plan-driven route available
+    const planRoute = routeFromPlan(state);
+    if (planRoute) {
+      return planRoute;
+    }
+    return routeSupervisor(state);
+  }
+
+  if (currentNode === "reviewer") {
+    return routeReviewer(state);
+  }
+
+  // After planner: if the plan has agent assignments, use plan-driven routing
+  if (currentNode === "planner" && state.plan.length > 0) {
+    const planRoute = routeFromPlan(state);
+    if (planRoute) {
+      return planRoute;
+    }
+  }
+
+  // Default: go back to supervisor
+  return { agents: ["supervisor"], parallel: false, done: false };
+}
+
+/**
+ * Merge two partial state updates together.
+ * Handles the append-semantics for messages, artifacts, errors, etc.
+ */
+function mergePartials(
+  a: Partial<AgentState>,
+  b: Partial<AgentState>
+): Partial<AgentState> {
+  const merged = { ...a, ...b };
+
+  // Messages: concat both
+  if (a.messages || b.messages) {
+    merged.messages = [...(a.messages ?? []), ...(b.messages ?? [])];
+  }
+
+  // Artifacts: merge objects
+  if (a.artifacts || b.artifacts) {
+    merged.artifacts = { ...(a.artifacts ?? {}), ...(b.artifacts ?? {}) };
+  }
+
+  // Errors: concat
+  if (a.errors || b.errors) {
+    merged.errors = [...(a.errors ?? []), ...(b.errors ?? [])];
+  }
+
+  // Agent comms: concat
+  if (a.agentComms || b.agentComms) {
+    merged.agentComms = [...(a.agentComms ?? []), ...(b.agentComms ?? [])];
+  }
+
+  // Terminal results: concat
+  if (a.terminalResults || b.terminalResults) {
+    merged.terminalResults = [...(a.terminalResults ?? []), ...(b.terminalResults ?? [])];
+  }
+
+  return merged;
 }
