@@ -74,11 +74,11 @@ export async function coderNode(
 
   const lastUserContent = [...state.messages].reverse().find(m => m.role === "user")?.content ?? "";
 
-  // Single consolidated User message - no consecutive same-role messages
   const messages = buildMessages({
     systemPrompt: sysPrompt,
     workspaceContext: state.workspaceContext,
     references: state.references,
+    chatHistory: state.chatHistory,
     userQuestion: lastUserContent,
     maxSystemChars: 12_000,
     maxWorkspaceChars: 8_000,

@@ -180,6 +180,7 @@ async function decomposeDomains(
   task: string,
   workspaceContext: string,
   plan: string[],
+  chatHistory: string,
   model: vscode.LanguageModelChat,
   token: vscode.CancellationToken
 ): Promise<DomainAssignment[]> {
@@ -191,6 +192,7 @@ async function decomposeDomains(
   const messages = buildMessages({
     systemPrompt: prompt,
     workspaceContext,
+    chatHistory,
     userQuestion: task,
     maxSystemChars: 6_000,
     maxWorkspaceChars: 8_000,
@@ -238,6 +240,7 @@ async function runSingleDomainCoder(
     systemPrompt: fullPrompt,
     workspaceContext: state.workspaceContext,
     references: state.references,
+    chatHistory: state.chatHistory,
     userQuestion: lastUserContent,
     maxSystemChars: 14_000,
     maxWorkspaceChars: 6_000,
@@ -296,6 +299,7 @@ export async function coderPoolNode(
       task,
       state.workspaceContext,
       state.plan,
+      state.chatHistory,
       model,
       token
     );

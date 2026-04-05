@@ -128,6 +128,7 @@ export async function researcherNode(
 
   const messages = buildMessages({
     systemPrompt: fullSystemPrompt,
+    chatHistory: state.chatHistory,
     userQuestion: lastUserMsg || "Analyze the research topic",
     maxSystemChars: 20_000,
     maxWorkspaceChars: 0, // workspace context already embedded above

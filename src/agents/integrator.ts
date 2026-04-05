@@ -108,6 +108,7 @@ export async function integratorNode(
     systemPrompt: sysPrompt,
     workspaceContext: state.workspaceContext,
     references: state.references,
+    chatHistory: state.chatHistory,
     userQuestion: `Integrate the outputs of ${domains.length} domain coders. Task: ${lastUserContent}`,
     maxSystemChars: 40_000,
     maxWorkspaceChars: 6_000,

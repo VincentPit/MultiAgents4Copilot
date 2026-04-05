@@ -49,6 +49,7 @@ export async function plannerNode(
     systemPrompt: SYSTEM_PROMPT,
     workspaceContext: state.workspaceContext,
     references: state.references,
+    chatHistory: state.chatHistory,
     userQuestion: lastUserMsg,
     maxSystemChars: 4_000,
     maxWorkspaceChars: 8_000,

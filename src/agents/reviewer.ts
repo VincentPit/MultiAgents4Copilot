@@ -45,6 +45,7 @@ export async function reviewerNode(
     systemPrompt: sysPrompt,
     workspaceContext: state.workspaceContext,
     references: state.references,
+    chatHistory: state.chatHistory,
     userQuestion: lastUserMsg || "Review the code above",
     maxSystemChars: 16_000,
     maxWorkspaceChars: 8_000,

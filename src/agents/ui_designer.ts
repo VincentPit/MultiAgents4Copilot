@@ -62,6 +62,7 @@ export async function uiDesigner(
     systemPrompt: sysPrompt,
     workspaceContext: state.workspaceContext,
     references: state.references,
+    chatHistory: state.chatHistory,
     userQuestion: lastUserMsg || "Design the UI",
     maxSystemChars: 12_000,
     maxWorkspaceChars: 8_000,

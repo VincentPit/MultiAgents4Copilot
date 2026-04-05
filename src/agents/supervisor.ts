@@ -75,6 +75,7 @@ export async function supervisorNode(
 
   const messages = buildMessages({
     systemPrompt: SYSTEM_PROMPT,
+    chatHistory: state.chatHistory,
     userQuestion: question,
     maxSystemChars: 2_000,
     maxWorkspaceChars: 0,

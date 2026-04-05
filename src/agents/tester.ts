@@ -86,6 +86,7 @@ export async function testGen(
     systemPrompt: sysPrompt,
     workspaceContext: state.workspaceContext,
     references: state.references,
+    chatHistory: state.chatHistory,
     userQuestion: lastUserMsg || "Generate tests for the code above",
     maxSystemChars: 12_000,
     maxWorkspaceChars: 8_000,

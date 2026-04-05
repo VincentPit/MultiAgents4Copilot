@@ -181,6 +181,10 @@ export function buildGraph(config: GraphConfig) {
 
     // Track consecutive failures to prevent loops
     const failedAgents = new Set<string>();
+    // Track consecutive same-agent runs to detect loops
+    let lastAgent = "";
+    let consecutiveCount = 0;
+    const MAX_CONSECUTIVE = 3; // same non-supervisor agent 3× in a row = stuck
 
     while (currentNode !== "__end__" && steps < maxSteps) {
       if (token.isCancellationRequested) {
@@ -225,6 +229,25 @@ export function buildGraph(config: GraphConfig) {
       agentRuns.push({ name: currentNode, durationMs });
       state = mergeState(state, update);
       steps++;
+
+      // ── Same-agent loop detection ──
+      if (currentNode !== "supervisor" && currentNode === lastAgent) {
+        consecutiveCount++;
+        if (consecutiveCount >= MAX_CONSECUTIVE) {
+          logger.warn("loop-detect", `${currentNode} ran ${consecutiveCount}× in a row — breaking loop`);
+          stream.markdown(`\n> ⚠️ Detected loop: **${currentNode}** ran ${consecutiveCount} times consecutively. Advancing.\n`);
+          // Force advance past this stuck point
+          if (state.plan.length > 0 && state.planStep < state.plan.length) {
+            state.planStep++;
+          }
+          consecutiveCount = 0;
+          currentNode = "supervisor";
+          continue;
+        }
+      } else {
+        consecutiveCount = currentNode === "supervisor" ? consecutiveCount : 1;
+      }
+      lastAgent = currentNode;
 
       // ── Route to next node(s) ──
       const route = determineRoute(currentNode, state, failedAgents);
@@ -315,15 +338,19 @@ export function buildGraph(config: GraphConfig) {
 
 /**
  * Determine the next route based on which node just executed.
- * Checks plan-driven routing first, then falls back to supervisor/reviewer routing.
+ *
+ * Key design: when a plan exists, agents chain directly from one plan step
+ * to the next WITHOUT bouncing through the supervisor for each step.
+ * The supervisor only re-engages when the plan is exhausted or a step
+ * has no agent tags.
  */
 function determineRoute(
   currentNode: string,
   state: AgentState,
-  failedAgents: Set<string>
+  _failedAgents: Set<string>
 ): RouteResult {
   if (currentNode === "supervisor") {
-    // First check if there's a plan-driven route available
+    // Supervisor just ran — check if there's a plan-driven route
     const planRoute = routeFromPlan(state);
     if (planRoute) {
       return planRoute;
@@ -335,12 +362,30 @@ function determineRoute(
     return routeReviewer(state);
   }
 
-  // After planner: if the plan has agent assignments, use plan-driven routing
+  // After planner creates a plan: start executing step 0 directly
   if (currentNode === "planner" && state.plan.length > 0) {
     const planRoute = routeFromPlan(state);
     if (planRoute) {
       return planRoute;
     }
+  }
+
+  // ── After any other agent: advance the plan and chain to next step ──
+  // This is the critical fix: instead of bouncing back to supervisor
+  // (which wastes an LLM call and then re-routes to the same plan step
+  // because planStep never advanced), we advance planStep here and go
+  // directly to the next plan step's agent.
+  if (state.plan.length > 0 && state.planStep < state.plan.length) {
+    state.planStep++;
+    logger.info("route", `Plan step advanced to ${state.planStep}/${state.plan.length}`);
+
+    if (state.planStep < state.plan.length) {
+      const nextPlanRoute = routeFromPlan(state);
+      if (nextPlanRoute) {
+        return nextPlanRoute;
+      }
+    }
+    // Plan exhausted or step has no agent tags — supervisor decides wrap-up
   }
 
   // Default: go back to supervisor
