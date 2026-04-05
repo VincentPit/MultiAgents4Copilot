@@ -11,9 +11,22 @@
  */
 
 import * as vscode from "vscode";
-import { AgentState, mergeState } from "./state";
+import { AgentState, mergeState, frozenSnapshot } from "./state";
 import { routeSupervisor, routeReviewer, routeFromPlan, type RouteResult } from "./router";
 import { logger } from "../utils/logger";
+import { getSecurityConfig } from "../security/securityConfig";
+
+/** Per-agent execution timeout (ms). If an agent takes longer, it's aborted. */
+const AGENT_TIMEOUT_MS = 120_000; // 2 minutes
+
+/** Wall-clock timeout for the entire graph run (ms). */
+const GRAPH_WALL_CLOCK_MS = 600_000; // 10 minutes
+
+/** Maximum accumulated errors before force-finishing. */
+const MAX_ERROR_COUNT = 10;
+
+/** Maximum state size in characters (rough JSON.stringify length). */
+const MAX_STATE_SIZE_CHARS = 2_000_000; // ~2 MB
 
 /** An agent node: receives state + VS Code LM + chat stream, returns a partial state update. */
 export type AgentNode = (
@@ -83,7 +96,16 @@ export function buildGraph(config: GraphConfig) {
     const start = Date.now();
     logger.agentStart(name);
     try {
-      const update = await nodeFn(state, model, stream, token);
+      // Race agent execution against a timeout
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error(`Agent "${name}" timed out after ${AGENT_TIMEOUT_MS}ms`)), AGENT_TIMEOUT_MS);
+      });
+
+      const update = await Promise.race([
+        nodeFn(state, model, stream, token),
+        timeoutPromise,
+      ]);
+
       const durationMs = Date.now() - start;
       logger.agentEnd(name, durationMs);
       return { update, durationMs };
@@ -116,8 +138,8 @@ export function buildGraph(config: GraphConfig) {
       `\n> 🔀 **Parallel execution:** ${labels.join(" + ")}\n\n`
     );
 
-    // Launch all agents concurrently with the same state snapshot
-    const stateSnapshot = { ...state };
+    // Launch all agents concurrently with an immutable state snapshot
+    const stateSnapshot = frozenSnapshot(state);
     const promises = agentNames.map(name =>
       runNode(name, stateSnapshot, model, stream, token)
     );
@@ -187,6 +209,22 @@ export function buildGraph(config: GraphConfig) {
     const MAX_CONSECUTIVE = 3; // same non-supervisor agent 3× in a row = stuck
 
     while (currentNode !== "__end__" && steps < maxSteps) {
+      // ── Wall-clock timeout ──
+      if (Date.now() - graphStart > GRAPH_WALL_CLOCK_MS) {
+        logger.warn("graph", `Wall-clock timeout reached (${GRAPH_WALL_CLOCK_MS}ms)`);
+        stream.markdown(`\n\n> ⚠️ Reached wall-clock time limit. Stopping.\n`);
+        state.status = "completed";
+        break;
+      }
+
+      // ── Error accumulation cap ──
+      if ((state.errors?.length ?? 0) >= MAX_ERROR_COUNT) {
+        logger.warn("graph", `Error accumulation cap reached (${state.errors.length} errors)`);
+        stream.markdown(`\n\n> ⚠️ Too many errors accumulated (${state.errors.length}). Stopping.\n`);
+        state.status = "error";
+        break;
+      }
+
       if (token.isCancellationRequested) {
         state.status = "error";
         break;
@@ -229,6 +267,20 @@ export function buildGraph(config: GraphConfig) {
       agentRuns.push({ name: currentNode, durationMs });
       state = mergeState(state, update);
       steps++;
+
+      // ── State size guard ──
+      try {
+        const stateSize = JSON.stringify(state).length;
+        if (stateSize > MAX_STATE_SIZE_CHARS) {
+          logger.warn("graph", `State size ${stateSize} exceeds limit ${MAX_STATE_SIZE_CHARS} — trimming messages`);
+          // Trim oldest non-user messages to bring size down
+          const userMsgs = state.messages.filter((m: { role: string }) => m.role === "user");
+          const recentMsgs = state.messages.slice(-20);
+          state.messages = [...userMsgs.slice(0, 1), ...recentMsgs];
+        }
+      } catch {
+        logger.warn("graph", "State is not JSON-serializable — possible corruption");
+      }
 
       // ── Same-agent loop detection ──
       if (currentNode !== "supervisor" && currentNode === lastAgent) {

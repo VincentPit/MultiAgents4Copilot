@@ -7,6 +7,23 @@
 
 import * as vscode from "vscode";
 
+// ── Safety limits ──────────────────────────────────────────────────────────
+
+/** Maximum messages before oldest are evicted. */
+const MAX_MESSAGES = 500;
+
+/** Maximum agent comms before oldest are evicted. */
+const MAX_AGENT_COMMS = 200;
+
+/** Maximum errors before oldest are evicted. */
+const MAX_ERRORS = 100;
+
+/** Maximum terminal results before oldest are evicted. */
+const MAX_TERMINAL_RESULTS = 50;
+
+/** Maximum length of any single string field (plan step, artifact, etc.). */
+const MAX_FIELD_LENGTH = 100_000;
+
 /** One message in the conversation. */
 export interface AgentMessage {
   role: "user" | "assistant" | "system";
@@ -163,6 +180,9 @@ export function getMessagesFor(state: AgentState, agentName: string): InterAgent
 /**
  * Merge a partial update into the current state.
  * `messages` are *appended*; everything else is overwritten.
+ *
+ * Safety: enforces size caps on all collection fields to prevent
+ * unbounded memory growth from runaway agents.
  */
 export function mergeState(
   current: AgentState,
@@ -195,5 +215,56 @@ export function mergeState(
     merged.terminalResults = [...current.terminalResults, ...update.terminalResults];
   }
 
+  // ── Enforce size caps to prevent unbounded growth ──
+  if (merged.messages.length > MAX_MESSAGES) {
+    // Keep first user message + most recent messages
+    const first = merged.messages[0];
+    merged.messages = [first, ...merged.messages.slice(-(MAX_MESSAGES - 1))];
+  }
+  if (merged.agentComms.length > MAX_AGENT_COMMS) {
+    merged.agentComms = merged.agentComms.slice(-MAX_AGENT_COMMS);
+  }
+  if (merged.errors.length > MAX_ERRORS) {
+    merged.errors = merged.errors.slice(-MAX_ERRORS);
+  }
+  if (merged.terminalResults.length > MAX_TERMINAL_RESULTS) {
+    merged.terminalResults = merged.terminalResults.slice(-MAX_TERMINAL_RESULTS);
+  }
+
+  // Clamp overly long string fields
+  if (merged.finalAnswer.length > MAX_FIELD_LENGTH) {
+    merged.finalAnswer = merged.finalAnswer.slice(0, MAX_FIELD_LENGTH) + "\n[... truncated]";
+  }
+  if (merged.workspaceContext.length > MAX_FIELD_LENGTH) {
+    merged.workspaceContext = merged.workspaceContext.slice(0, MAX_FIELD_LENGTH);
+  }
+
   return merged;
+}
+
+/**
+ * Create an immutable snapshot of the state for safe use in parallel agents.
+ * Uses structured clone + Object.freeze to prevent cross-contamination.
+ */
+export function frozenSnapshot(state: AgentState): Readonly<AgentState> {
+  const clone: AgentState = {
+    messages: [...state.messages],
+    nextAgent: state.nextAgent,
+    pendingAgents: [...state.pendingAgents],
+    plan: [...state.plan],
+    planStep: state.planStep,
+    artifacts: { ...state.artifacts },
+    reviewCount: state.reviewCount,
+    finalAnswer: state.finalAnswer,
+    status: state.status,
+    reviewVerdict: state.reviewVerdict,
+    agentComms: [...state.agentComms],
+    errors: [...state.errors],
+    workspaceContext: state.workspaceContext,
+    references: state.references,
+    chatHistory: state.chatHistory,
+    terminalResults: [...state.terminalResults],
+    domainAssignments: [...state.domainAssignments],
+  };
+  return Object.freeze(clone);
 }

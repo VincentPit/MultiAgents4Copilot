@@ -7,6 +7,7 @@ import {
   mergeState,
   postAgentMessage,
   getMessagesFor,
+  frozenSnapshot,
   type AgentState,
 } from "../../graph/state";
 
@@ -123,6 +124,180 @@ describe("mergeState", () => {
     const update = { planStep: 2 };
     const merged = mergeState(base, update);
     expect(merged.planStep).toBe(2);
+  });
+});
+
+// ── Size cap tests ────────────────────────────────────────────────────
+
+describe("mergeState — size caps", () => {
+  let base: AgentState;
+
+  beforeEach(() => {
+    base = createInitialState("test");
+  });
+
+  it("evicts oldest messages when exceeding 500, keeping first user message", () => {
+    // Seed with 499 messages (1 user already in base)
+    for (let i = 0; i < 498; i++) {
+      base.messages.push({ role: "assistant", name: "coder", content: `msg-${i}` });
+    }
+    expect(base.messages).toHaveLength(499);
+
+    // Add 10 more in the update — total would be 509, should be capped at 500
+    const update = {
+      messages: Array.from({ length: 10 }, (_, i) => ({
+        role: "assistant" as const,
+        name: "coder",
+        content: `new-${i}`,
+      })),
+    };
+
+    const merged = mergeState(base, update);
+    expect(merged.messages.length).toBeLessThanOrEqual(500);
+    // First message is still the original user message
+    expect(merged.messages[0].role).toBe("user");
+    expect(merged.messages[0].content).toBe("test");
+    // Last messages are the newest ones
+    expect(merged.messages[merged.messages.length - 1].content).toBe("new-9");
+  });
+
+  it("evicts oldest agentComms when exceeding 200", () => {
+    base.agentComms = Array.from({ length: 199 }, (_, i) => ({
+      from: "a",
+      to: "b",
+      type: "info" as const,
+      content: `comm-${i}`,
+      timestamp: i,
+    }));
+
+    const update = {
+      agentComms: Array.from({ length: 10 }, (_, i) => ({
+        from: "c",
+        to: "d",
+        type: "info" as const,
+        content: `new-comm-${i}`,
+        timestamp: 1000 + i,
+      })),
+    };
+
+    const merged = mergeState(base, update);
+    expect(merged.agentComms.length).toBeLessThanOrEqual(200);
+    // Should keep the newest ones
+    expect(merged.agentComms[merged.agentComms.length - 1].content).toBe("new-comm-9");
+  });
+
+  it("evicts oldest errors when exceeding 100", () => {
+    base.errors = Array.from({ length: 99 }, (_, i) => `error-${i}`);
+
+    const update = { errors: Array.from({ length: 10 }, (_, i) => `new-error-${i}`) };
+    const merged = mergeState(base, update);
+    expect(merged.errors.length).toBeLessThanOrEqual(100);
+    expect(merged.errors[merged.errors.length - 1]).toBe("new-error-9");
+  });
+
+  it("evicts oldest terminalResults when exceeding 50", () => {
+    base.terminalResults = Array.from({ length: 49 }, (_, i) => ({
+      command: `cmd-${i}`,
+      success: true,
+      stdout: "",
+      stderr: "",
+      agent: "coder",
+    }));
+
+    const update = {
+      terminalResults: Array.from({ length: 10 }, (_, i) => ({
+        command: `new-cmd-${i}`,
+        success: true,
+        stdout: "",
+        stderr: "",
+        agent: "test_gen",
+      })),
+    };
+
+    const merged = mergeState(base, update);
+    expect(merged.terminalResults.length).toBeLessThanOrEqual(50);
+    expect(merged.terminalResults[merged.terminalResults.length - 1].command).toBe("new-cmd-9");
+  });
+
+  it("clamps overly long finalAnswer", () => {
+    const update = { finalAnswer: "x".repeat(200_000) };
+    const merged = mergeState(base, update);
+    expect(merged.finalAnswer.length).toBeLessThanOrEqual(100_100); // 100K + truncation notice
+    expect(merged.finalAnswer).toContain("[... truncated]");
+  });
+
+  it("clamps overly long workspaceContext", () => {
+    const update = { workspaceContext: "y".repeat(200_000) };
+    const merged = mergeState(base, update);
+    expect(merged.workspaceContext.length).toBeLessThanOrEqual(100_000);
+  });
+
+  it("does not modify state that's within limits", () => {
+    const update = {
+      messages: [{ role: "assistant" as const, content: "ok", name: "coder" }],
+      finalAnswer: "short answer",
+    };
+    const merged = mergeState(base, update);
+    expect(merged.messages).toHaveLength(2);
+    expect(merged.finalAnswer).toBe("short answer");
+  });
+});
+
+// ── Frozen snapshot tests ────────────────────────────────────────────
+
+describe("frozenSnapshot", () => {
+  it("returns an object frozen with Object.freeze", () => {
+    const state = createInitialState("test");
+    const snap = frozenSnapshot(state);
+    expect(Object.isFrozen(snap)).toBe(true);
+  });
+
+  it("produces a deep copy — mutations to original don't affect snapshot", () => {
+    const state = createInitialState("test");
+    const snap = frozenSnapshot(state);
+
+    // Mutate original
+    state.messages.push({ role: "assistant", content: "added", name: "x" });
+    state.errors.push("new error");
+    state.artifacts["key"] = "value";
+
+    // Snapshot should be unchanged
+    expect(snap.messages).toHaveLength(1);
+    expect(snap.errors).toHaveLength(0);
+    expect(snap.artifacts).toEqual({});
+  });
+
+  it("produces a deep copy — mutations to snapshot throw in strict mode", () => {
+    const state = createInitialState("test");
+    const snap = frozenSnapshot(state);
+
+    // Attempting to mutate frozen object should throw
+    expect(() => {
+      (snap as any).nextAgent = "coder";
+    }).toThrow();
+  });
+
+  it("preserves all fields from the original state", () => {
+    const state = createInitialState("hello", "workspace info");
+    state.nextAgent = "planner";
+    state.planStep = 3;
+    state.plan = ["step1", "step2", "step3", "step4"];
+    state.reviewCount = 2;
+    state.finalAnswer = "done";
+    state.status = "completed";
+    state.reviewVerdict = "approve";
+
+    const snap = frozenSnapshot(state);
+
+    expect(snap.messages[0].content).toBe("hello");
+    expect(snap.workspaceContext).toBe("workspace info");
+    expect(snap.nextAgent).toBe("planner");
+    expect(snap.planStep).toBe(3);
+    expect(snap.plan).toEqual(["step1", "step2", "step3", "step4"]);
+    expect(snap.reviewCount).toBe(2);
+    expect(snap.finalAnswer).toBe("done");
+    expect(snap.status).toBe("completed");
+    expect(snap.reviewVerdict).toBe("approve");
   });
 });
 

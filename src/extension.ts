@@ -25,8 +25,12 @@ import { uiDesigner } from "./agents/ui_designer";
 import { testGen } from "./agents/tester";
 import { logger } from "./utils/logger";
 import { getWorkspaceSnapshot, formatSnapshotForLLM } from "./utils/workspace";
+import { runIntegrityCheck, type IntegrityReport } from "./utils/integrity";
 
 const PARTICIPANT_ID = "multi-agent-copilot.team";
+
+/** Cached integrity report — checked once at activation. */
+let _integrityReport: IntegrityReport | null = null;
 
 export function activate(context: vscode.ExtensionContext) {
   const agent = vscode.chat.createChatParticipant(PARTICIPANT_ID, handler);
@@ -49,7 +53,20 @@ export function activate(context: vscode.ExtensionContext) {
   };
 
   context.subscriptions.push(agent);
-  logger.info("extension", "Multi-Agent Copilot activated (v0.6.0)");
+  logger.info("extension", "Multi-Agent Copilot activated (v0.7.0)");
+
+  // Run module integrity check asynchronously at activation
+  runIntegrityCheck().then(report => {
+    _integrityReport = report;
+    if (!report.ok) {
+      const failList = report.failures.map(f => `${f.module}.${f.export}`).join(", ");
+      vscode.window.showErrorMessage(
+        `Multi-Agent Copilot: Module integrity check failed (${report.failures.length} issue(s): ${failList}). The extension may not work correctly.`
+      );
+    }
+  }).catch(err => {
+    logger.error("integrity", `Integrity check threw: ${err}`);
+  });
 }
 
 // ── Agent node map ────────────────────────────────────────────────────
@@ -74,6 +91,21 @@ const handler: vscode.ChatRequestHandler = async (
   stream: vscode.ChatResponseStream,
   token: vscode.CancellationToken
 ): Promise<void> => {
+  // 0. Gate: abort early if module integrity check failed
+  if (_integrityReport && !_integrityReport.ok) {
+    const failList = _integrityReport.failures
+      .map(f => `\`${f.module}.${f.export}\` (expected ${f.expected}, got ${f.actual})`)
+      .join("\n- ");
+    stream.markdown(
+      `## ⛔ Module Integrity Failure\n\n` +
+      `The extension detected broken or missing modules at startup:\n\n` +
+      `- ${failList}\n\n` +
+      `> This usually means source files were corrupted or truncated. ` +
+      `Try restoring from git: \`git checkout HEAD -- src/\`\n`
+    );
+    return;
+  }
+
   // 1. Use the model from the chat request (user's dropdown), fall back to explicit selection
   let model: vscode.LanguageModelChat | undefined = request.model;
   if (!model) {

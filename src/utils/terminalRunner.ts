@@ -22,6 +22,10 @@
 import * as vscode from "vscode";
 import * as cp from "child_process";
 import { logger } from "./logger";
+import { getSecurityConfig } from "../security/securityConfig";
+
+/** Maximum allowed command argument length. */
+const MAX_COMMAND_LENGTH = getSecurityConfig().terminalRunner.maxArgLength;
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -125,7 +129,8 @@ const BLOCKED_PATTERNS: RegExp[] = [
   /\bsudo\s+rm\b/,                                 // sudo rm anything
   /\bmkfs\b/,                                       // format disk
   /\bdd\s+if=/,                                     // dd (disk destroyer)
-  /\b:\(\)\s*\{/,                                   // fork bomb
+  /\b:\(\)\s*\{/,                                   // fork bomb :(){ ... }
+  /:\(\)\s*\{[^}]*\|\s*:/,                          // fork bomb variant :(){ :|:& };:
   />\s*\/dev\/sd[a-z]/,                             // write to raw disk
   /\bcurl\b.*\|\s*(?:sudo\s+)?(?:bash|sh|zsh)\b/,  // curl | bash
   /\bwget\b.*\|\s*(?:sudo\s+)?(?:bash|sh|zsh)\b/,  // wget | bash
@@ -135,6 +140,11 @@ const BLOCKED_PATTERNS: RegExp[] = [
 
 /** Check if a command is blocked for safety. */
 function isBlocked(command: string): boolean {
+  // Length check first
+  if (command.length > MAX_COMMAND_LENGTH) {
+    logger.warn("terminalRunner", `Command too long (${command.length} chars > ${MAX_COMMAND_LENGTH})`);
+    return true;
+  }
   return BLOCKED_PATTERNS.some((pattern) => pattern.test(command));
 }
 

@@ -3,6 +3,12 @@
  */
 
 import * as vscode from "vscode";
+
+// Mock the integrity checker to return a passing result in tests
+jest.mock("../utils/integrity", () => ({
+  runIntegrityCheck: jest.fn().mockResolvedValue({ ok: true, failures: [], passed: ["all"] }),
+}));
+
 import { activate, deactivate } from "../extension.js";
 
 const mockCreateChatParticipant = vscode.chat.createChatParticipant as jest.Mock;

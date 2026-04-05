@@ -125,6 +125,9 @@ export async function selectModel(
 
 const MAX_RETRIES = 3;
 
+/** Maximum output characters — prevents a runaway model from flooding the state. */
+const MAX_OUTPUT_CHARS = 200_000;
+
 /**
  * Compute a safe token budget for a model.
  * Uses model.maxInputTokens if available, otherwise defaults conservatively.
@@ -178,11 +181,18 @@ export async function callModel(
 
       const response = await model.sendRequest(messages, {}, token);
       const chunks: string[] = [];
+      let outputChars = 0;
 
       for await (const chunk of response.text) {
         chunks.push(chunk);
+        outputChars += chunk.length;
         if (stream) {
           stream.markdown(chunk);
+        }
+        // Safety: stop accumulating if output is absurdly large
+        if (outputChars > MAX_OUTPUT_CHARS) {
+          logger.warn(agentName, `Output exceeded ${MAX_OUTPUT_CHARS} chars — truncating`);
+          break;
         }
       }
 
@@ -325,17 +335,22 @@ export function buildMessages(opts: {
   const maxRefs = opts.maxReferencesChars ?? 10_000;
   const maxTotal = opts.maxTotalChars ?? 60_000;
 
+  // Sanitize inputs — strip known LLM instruction markers that could
+  // be injected via file contents or chat history
+  const sanitize = (s: string): string =>
+    s.replace(/<\|im_start\|>|<\|im_end\|>|<<SYS>>|<<\/SYS>>|\[INST\]|\[\/INST\]/gi, "[filtered]");
+
   let combined = capContext(opts.systemPrompt, maxSys);
   if (opts.references) {
-    combined += `\n\n---\n[REFERENCES]\n${capContext(opts.references, maxRefs)}`;
+    combined += `\n\n---\n[REFERENCES]\n${capContext(sanitize(opts.references), maxRefs)}`;
   }
   if (opts.workspaceContext) {
-    combined += `\n\n---\n[WORKSPACE]\n${capContext(opts.workspaceContext, maxWs)}`;
+    combined += `\n\n---\n[WORKSPACE]\n${capContext(sanitize(opts.workspaceContext), maxWs)}`;
   }
   if (opts.chatHistory) {
-    combined += `\n\n---\n[CHAT HISTORY]\n${capContext(opts.chatHistory, 4_000)}`;
+    combined += `\n\n---\n[CHAT HISTORY]\n${capContext(sanitize(opts.chatHistory), 4_000)}`;
   }
-  combined += `\n\n---\n[USER REQUEST]\n${opts.userQuestion}`;
+  combined += `\n\n---\n[USER REQUEST]\n${sanitize(opts.userQuestion)}`;
 
   // Hard-cap the entire combined message
   if (combined.length > maxTotal) {

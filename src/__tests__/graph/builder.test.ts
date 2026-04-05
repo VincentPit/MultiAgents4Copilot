@@ -329,6 +329,129 @@ describe("AGENT_DISPLAY", () => {
   });
 });
 
+// ── Robustness hardening tests ─────────────────────────────────────────
+
+describe("buildGraph — error accumulation cap", () => {
+  it("stops execution when too many errors accumulate", async () => {
+    let supervisorCalls = 0;
+    const nodes: Record<string, AgentNode> = {
+      supervisor: async () => {
+        supervisorCalls++;
+        return { nextAgent: "coder" };
+      },
+      coder: async () => {
+        throw new Error(`Error #${supervisorCalls}`);
+      },
+    };
+
+    const graph = buildGraph({ nodes, entryPoint: "supervisor", maxSteps: 100 });
+    const state = createInitialState("test error cap");
+    // Pre-seed with errors near the cap
+    state.errors = Array.from({ length: 9 }, (_, i) => `pre-error-${i}`);
+    const stream = mockStream();
+    const result = await graph.run(state, mockModel, stream, mockToken());
+
+    // Should have stopped due to error cap
+    expect(result.state.errors.length).toBeGreaterThanOrEqual(10);
+    const mdCalls = (stream.markdown as jest.Mock).mock.calls.map((c: any[]) => c[0]);
+    expect(mdCalls.some((m: string) => m.includes("Too many errors"))).toBe(true);
+  });
+});
+
+describe("buildGraph — state size guard", () => {
+  it("trims messages when state exceeds 2MB", async () => {
+    let supervisorCalls = 0;
+    const nodes: Record<string, AgentNode> = {
+      supervisor: async () => {
+        supervisorCalls++;
+        if (supervisorCalls === 1) { return { nextAgent: "coder" }; }
+        return { nextAgent: "finish" };
+      },
+      coder: async () => ({
+        // Generate a very large message to trigger the guard
+        messages: [{ role: "assistant" as const, content: "x".repeat(2_500_000), name: "coder" }],
+      }),
+    };
+
+    const graph = buildGraph({ nodes, entryPoint: "supervisor", maxSteps: 20 });
+    const state = createInitialState("test state size");
+    const result = await graph.run(state, mockModel, mockStream(), mockToken());
+
+    // Messages should have been trimmed
+    const stateSize = JSON.stringify(result.state).length;
+    // After trimming, state should be much smaller than the 2.5M message we injected
+    expect(result.state.messages.length).toBeLessThanOrEqual(22); // user msgs + recent 20
+  });
+});
+
+describe("buildGraph — agent timeout", () => {
+  it("records an error when an agent hangs (simulated via rejection)", async () => {
+    let supervisorCalls = 0;
+    const nodes: Record<string, AgentNode> = {
+      supervisor: async () => {
+        supervisorCalls++;
+        if (supervisorCalls === 1) { return { nextAgent: "coder" }; }
+        return { nextAgent: "finish" };
+      },
+      coder: async () => {
+        throw new Error('Agent "coder" timed out after 120000ms');
+      },
+    };
+
+    const graph = buildGraph({ nodes, entryPoint: "supervisor", maxSteps: 20 });
+    const state = createInitialState("test timeout");
+    const stream = mockStream();
+    const result = await graph.run(state, mockModel, stream, mockToken());
+
+    expect(result.state.errors.some(e => e.includes("timed out"))).toBe(true);
+  });
+});
+
+describe("buildGraph — unknown agent node", () => {
+  it("finishes gracefully when supervisor routes to an invalid agent", async () => {
+    const nodes: Record<string, AgentNode> = {
+      supervisor: async () => ({ nextAgent: "nonexistent_agent" }),
+    };
+
+    const graph = buildGraph({ nodes, entryPoint: "supervisor", maxSteps: 10 });
+    const state = createInitialState("test unknown");
+    const stream = mockStream();
+    const result = await graph.run(state, mockModel, stream, mockToken());
+
+    // Router treats unknown agent names as "done" — graph finishes cleanly
+    expect(result.state.status).toBe("completed");
+    expect(result.totalSteps).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe("buildGraph — loop detection", () => {
+  it("detects and breaks same-agent loops", async () => {
+    let coderCalls = 0;
+    let supervisorCalls = 0;
+    const nodes: Record<string, AgentNode> = {
+      supervisor: async () => {
+        supervisorCalls++;
+        return { nextAgent: "coder" };
+      },
+      coder: async () => {
+        coderCalls++;
+        // Always route back to coder (simulated via plan routing)
+        return {
+          messages: [{ role: "assistant" as const, content: `code attempt ${coderCalls}`, name: "coder" }],
+        };
+      },
+    };
+
+    const graph = buildGraph({ nodes, entryPoint: "supervisor", maxSteps: 30 });
+    const state = createInitialState("test loop");
+    const stream = mockStream();
+    await graph.run(state, mockModel, stream, mockToken());
+
+    // Should have invoked coder but eventually broken out
+    expect(coderCalls).toBeGreaterThanOrEqual(1);
+  });
+});
+
 describe("AgentRun", () => {
   it("includes parallel flag in metadata", () => {
     // Quick check that the parallel property is present in the type

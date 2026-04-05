@@ -20,6 +20,17 @@
 import * as vscode from "vscode";
 import * as path from "path";
 import { logger } from "./logger";
+import { getSecurityConfig } from "../security/securityConfig";
+
+// ── Safety constants ────────────────────────────────────────────────────────
+
+/** File extensions that must never be written by agents. */
+const BLOCKED_EXTENSIONS = new Set(
+  getSecurityConfig().fileWriter.blockedExtensions
+);
+
+/** Maximum file content size agents can write (5 MB). */
+const MAX_FILE_SIZE = getSecurityConfig().fileWriter.maxFileSizeBytes;
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -265,6 +276,23 @@ export async function writeFileBlocks(
     if (block.filePath.includes("..")) {
       result.skipped.push({ filePath: block.filePath, reason: "path contains .." });
       logger.warn("fileWriter", `Skipped "${block.filePath}" — contains ".." (path traversal)`);
+      continue;
+    }
+
+    // Safety: reject blocked file extensions
+    const ext = path.extname(block.filePath).toLowerCase();
+    if (BLOCKED_EXTENSIONS.has(ext)) {
+      result.skipped.push({ filePath: block.filePath, reason: `blocked extension: ${ext}` });
+      logger.warn("fileWriter", `Skipped "${block.filePath}" — blocked extension ${ext}`);
+      stream.markdown(`\n> 🚫 **Blocked:** \`${block.filePath}\` — writing \`${ext}\` files is not allowed.\n`);
+      continue;
+    }
+
+    // Safety: reject files that are too large
+    if (block.content.length > MAX_FILE_SIZE) {
+      result.skipped.push({ filePath: block.filePath, reason: `content too large (${block.content.length} bytes)` });
+      logger.warn("fileWriter", `Skipped "${block.filePath}" — content ${block.content.length} bytes exceeds ${MAX_FILE_SIZE}`);
+      stream.markdown(`\n> ⚠️ **Skipped:** \`${block.filePath}\` — file too large (${Math.round(block.content.length / 1024)}KB).\n`);
       continue;
     }
 

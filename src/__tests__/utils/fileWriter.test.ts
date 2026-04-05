@@ -154,3 +154,108 @@ describe("parseFileBlocks", () => {
     expect(blocks[0].language).toBe("css");
   });
 });
+
+// ── writeFileBlocks security tests ──────────────────────────────────
+
+import { writeFileBlocks, type WriteResult } from "../../utils/fileWriter";
+import * as vscode from "vscode";
+
+describe("writeFileBlocks — security hardening", () => {
+  function mockStream() {
+    return {
+      markdown: jest.fn(),
+      progress: jest.fn(),
+      reference: jest.fn(),
+      button: jest.fn(),
+      anchor: jest.fn(),
+    } as unknown as vscode.ChatResponseStream;
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    // Consent approved by default
+    (vscode.window.showWarningMessage as jest.Mock).mockResolvedValue("Apply Changes");
+  });
+
+  it("rejects files with blocked extensions (.exe)", async () => {
+    const stream = mockStream();
+    const blocks = [{ filePath: "malware.exe", content: "MZ...", language: "binary" }];
+
+    const result = await writeFileBlocks(blocks, stream);
+    expect(result.written).toHaveLength(0);
+    expect(result.skipped).toHaveLength(1);
+    expect(result.skipped[0].reason).toContain("blocked extension");
+  });
+
+  it("rejects files with blocked extensions (.dll)", async () => {
+    const stream = mockStream();
+    const blocks = [{ filePath: "hack.dll", content: "data", language: "binary" }];
+
+    const result = await writeFileBlocks(blocks, stream);
+    expect(result.skipped[0].reason).toContain("blocked extension");
+  });
+
+  it("rejects files with blocked extensions (.so)", async () => {
+    const stream = mockStream();
+    const blocks = [{ filePath: "lib.so", content: "data", language: "binary" }];
+
+    const result = await writeFileBlocks(blocks, stream);
+    expect(result.skipped[0].reason).toContain("blocked extension");
+  });
+
+  it("rejects files that exceed max size", async () => {
+    const stream = mockStream();
+    const hugeContent = "x".repeat(6 * 1024 * 1024); // 6 MB
+    const blocks = [{ filePath: "huge.ts", content: hugeContent, language: "typescript" }];
+
+    const result = await writeFileBlocks(blocks, stream);
+    expect(result.written).toHaveLength(0);
+    expect(result.skipped).toHaveLength(1);
+    expect(result.skipped[0].reason).toContain("too large");
+  });
+
+  it("rejects path traversal attempts (..)", async () => {
+    const stream = mockStream();
+    const blocks = [{ filePath: "../../../etc/passwd", content: "data", language: "text" }];
+
+    const result = await writeFileBlocks(blocks, stream);
+    expect(result.written).toHaveLength(0);
+    expect(result.skipped[0].reason).toContain("..");
+  });
+
+  it("allows safe file extensions (.ts, .py, .json)", async () => {
+    const stream = mockStream();
+    const blocks = [
+      { filePath: "src/app.ts", content: "const x = 1;", language: "typescript" },
+    ];
+
+    const result = await writeFileBlocks(blocks, stream);
+    expect(result.written).toHaveLength(1);
+    expect(result.written[0]).toBe("src/app.ts");
+  });
+
+  it("skips all files when user declines consent", async () => {
+    (vscode.window.showWarningMessage as jest.Mock).mockResolvedValue("Cancel");
+    const stream = mockStream();
+    const blocks = [{ filePath: "src/app.ts", content: "const x = 1;", language: "typescript" }];
+
+    const result = await writeFileBlocks(blocks, stream);
+    expect(result.written).toHaveLength(0);
+    expect(result.skipped).toHaveLength(1);
+    expect(result.skipped[0].reason).toContain("declined");
+  });
+
+  it("handles mixed safe and unsafe blocks", async () => {
+    const stream = mockStream();
+    const blocks = [
+      { filePath: "src/app.ts", content: "const x = 1;", language: "typescript" },
+      { filePath: "evil.exe", content: "binary", language: "binary" },
+      { filePath: "../escape.txt", content: "escape", language: "text" },
+      { filePath: "src/utils.ts", content: "export {};", language: "typescript" },
+    ];
+
+    const result = await writeFileBlocks(blocks, stream);
+    expect(result.written).toHaveLength(2); // app.ts and utils.ts
+    expect(result.skipped).toHaveLength(2); // evil.exe and ../escape.txt
+  });
+});
