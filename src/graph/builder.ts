@@ -16,8 +16,26 @@ import { routeSupervisor, routeReviewer, routeFromPlan, type RouteResult } from 
 import { logger } from "../utils/logger";
 import { getSecurityConfig } from "../security/securityConfig";
 
-/** Per-agent execution timeout (ms). If an agent takes longer, it's aborted. */
-const AGENT_TIMEOUT_MS = 120_000; // 2 minutes
+/** Default per-agent timeout (ms). */
+const DEFAULT_AGENT_TIMEOUT_MS = 120_000; // 2 minutes
+
+/**
+ * Per-agent timeout overrides (ms).
+ * Agents that perform internal fan-out (like coder_pool) need much
+ * longer than single-call agents because they run decomposition +
+ * N parallel LLM calls + file writes + terminal commands.
+ */
+const AGENT_TIMEOUT_OVERRIDES: Record<string, number> = {
+  coder_pool: 300_000,  // 5 min — runs N domain coders in parallel internally
+  integrator: 180_000,  // 3 min — cross-domain merge can be slow
+  coder:      180_000,  // 3 min — may write many files + run commands
+  test_gen:   180_000,  // 3 min — generates tests then runs them
+};
+
+/** Resolve the timeout for a given agent. */
+function agentTimeout(name: string): number {
+  return AGENT_TIMEOUT_OVERRIDES[name] ?? DEFAULT_AGENT_TIMEOUT_MS;
+}
 
 /** Wall-clock timeout for the entire graph run (ms). */
 const GRAPH_WALL_CLOCK_MS = 600_000; // 10 minutes
@@ -96,15 +114,20 @@ export function buildGraph(config: GraphConfig) {
     const start = Date.now();
     logger.agentStart(name);
     try {
-      // Race agent execution against a timeout
+      // Race agent execution against a per-agent timeout
+      const timeoutMs = agentTimeout(name);
+      let timer: ReturnType<typeof setTimeout> | undefined;
       const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error(`Agent "${name}" timed out after ${AGENT_TIMEOUT_MS}ms`)), AGENT_TIMEOUT_MS);
+        timer = setTimeout(
+          () => reject(new Error(`Agent "${name}" timed out after ${timeoutMs}ms`)),
+          timeoutMs,
+        );
       });
 
       const update = await Promise.race([
         nodeFn(state, model, stream, token),
         timeoutPromise,
-      ]);
+      ]).finally(() => { if (timer) clearTimeout(timer); });
 
       const durationMs = Date.now() - start;
       logger.agentEnd(name, durationMs);
@@ -247,17 +270,34 @@ export function buildGraph(config: GraphConfig) {
         state.errors = [...(state.errors ?? []), `${currentNode}: ${error}`];
         failedAgents.add(currentNode);
 
-        if (failedAgents.size >= 2) {
-          stream.markdown(`\n\n> ⚠️ Multiple agents failed. Finishing with available results.\n`);
+        // ── Automatic fallback: coder_pool → single coder ──
+        if (currentNode === "coder_pool" && !failedAgents.has("coder") && nodes["coder"]) {
+          stream.markdown(`\n> 🔄 **Falling back** from Engineering Team to single Coder…\n`);
+          currentNode = "coder";
+          steps++;
+          continue;
+        }
+
+        if (failedAgents.size >= 3) {
+          stream.markdown(`\n\n> ⚠️ Too many agents failed (${failedAgents.size}). Finishing with available results.\n`);
           state.status = "completed";
           currentNode = "__end__";
           steps++;
           continue;
         }
 
-        // Re-route through supervisor
+        // Re-route through supervisor with failure context
+        // Inject failure info so the supervisor LLM knows which agents to avoid
+        const failedList = [...failedAgents].join(", ");
         state.nextAgent = "supervisor";
-        state.errors = [...(state.errors ?? []), `DO_NOT_ROUTE:${currentNode}`];
+        state.messages = [
+          ...state.messages,
+          {
+            role: "system" as const,
+            name: "graph-router",
+            content: `Agent "${currentNode}" failed: ${error}. Previously failed agents: [${failedList}]. Do NOT route to any of these agents. Choose a different agent or FINISH.`,
+          },
+        ];
         currentNode = "supervisor";
         steps++;
         continue;

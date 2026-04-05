@@ -63,6 +63,15 @@ export async function supervisorNode(
     ? `[${lastMsg.name ?? lastMsg.role}]: ${lastMsg.content.slice(0, 150)}`
     : "none";
 
+  // Extract failed agent names from graph-router system messages
+  const failedAgentNames = state.messages
+    .filter(m => m.name === "graph-router")
+    .flatMap(m => {
+      const match = m.content.match(/Previously failed agents: \[([^\]]*)\]/);
+      return match ? match[1].split(",").map(s => s.trim()).filter(Boolean) : [];
+    })
+    .filter((v, i, a) => a.indexOf(v) === i);
+
   const question =
     `Task: ${state.messages.find(m => m.role === "user")?.content ?? "unknown"}\n` +
     `Agents completed: ${completedAgents.join(", ") || "none"}\n` +
@@ -70,6 +79,9 @@ export async function supervisorNode(
     (hasPlan && state.planStep < state.plan.length
       ? `Current plan step (${state.planStep + 1}/${state.plan.length}): ${state.plan[state.planStep]}\n`
       : hasPlan ? `All ${state.plan.length} plan steps addressed.\n` : "") +
+    (failedAgentNames.length > 0
+      ? `FAILED AGENTS (do NOT route to these): ${failedAgentNames.join(", ")}\n`
+      : "") +
     `Last output: ${lastSnippet}\n` +
     `Which agent(s) next? Use commas for parallel work.`;
 
@@ -98,6 +110,18 @@ export async function supervisorNode(
   if (hasPlan) {
     agents = agents.filter(a => a !== "planner");
     if (agents.length === 0) { agents = ["coder"]; }
+  }
+
+  // Don't route to agents the graph has flagged as failed
+  if (failedAgentNames.length > 0) {
+    const before = agents.length;
+    agents = agents.filter(a => !failedAgentNames.includes(a));
+    if (agents.length === 0) {
+      // Everything the LLM chose has failed — finish gracefully
+      agents = ["finish"];
+    } else if (agents.length < before) {
+      logger.info("supervisor", `Filtered out failed agents: ${failedAgentNames.join(", ")}`);
+    }
   }
 
   const isFinish = agents.length === 1 && agents[0] === "finish";

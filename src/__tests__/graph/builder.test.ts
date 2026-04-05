@@ -463,3 +463,91 @@ describe("AgentRun", () => {
     expect(run.parallel).toBe(true);
   });
 });
+
+// ── coder_pool → coder fallback tests ──────────────────────────────────
+
+describe("buildGraph — coder_pool fallback", () => {
+  it("falls back to single coder when coder_pool times out", async () => {
+    let coderCalled = false;
+    const nodes: Record<string, AgentNode> = {
+      supervisor: async () => ({ nextAgent: "coder_pool" }),
+      coder_pool: async () => {
+        // Simulate a timeout error (the real one is thrown by Promise.race)
+        throw new Error('Agent "coder_pool" timed out after 300000ms');
+      },
+      coder: async () => {
+        coderCalled = true;
+        return {
+          messages: [{ role: "assistant" as const, content: "code output", name: "coder" }],
+          nextAgent: "finish",
+        };
+      },
+    };
+
+    const graph = buildGraph({ nodes, entryPoint: "supervisor", maxSteps: 20 });
+    const state = createInitialState("build a project");
+    const stream = mockStream();
+    const result = await graph.run(state, mockModel, stream, mockToken());
+
+    // coder should have been called as fallback
+    expect(coderCalled).toBe(true);
+    // coder_pool should be in the errors
+    expect(result.state.errors.some(e => e.includes("coder_pool"))).toBe(true);
+  });
+
+  it("injects failure context into messages so supervisor avoids failed agents", async () => {
+    let supervisorCallCount = 0;
+    const nodes: Record<string, AgentNode> = {
+      supervisor: async (state) => {
+        supervisorCallCount++;
+        if (supervisorCallCount === 1) {
+          return { nextAgent: "researcher" };
+        }
+        // After researcher fails, supervisor is called again
+        return { nextAgent: "finish" };
+      },
+      researcher: async () => {
+        throw new Error("Model unavailable");
+      },
+    };
+
+    const graph = buildGraph({ nodes, entryPoint: "supervisor", maxSteps: 20 });
+    const state = createInitialState("test failure context");
+    const stream = mockStream();
+    const result = await graph.run(state, mockModel, stream, mockToken());
+
+    // Should have injected a system message about the failure
+    const routerMsgs = result.state.messages.filter(
+      (m: { name?: string }) => m.name === "graph-router"
+    );
+    expect(routerMsgs.length).toBeGreaterThanOrEqual(1);
+    expect(routerMsgs[0].content).toContain("researcher");
+    expect(routerMsgs[0].content).toContain("Do NOT route");
+  });
+
+  it("finishes when 3 or more agents have failed", async () => {
+    let supervisorCalls = 0;
+    const nodes: Record<string, AgentNode> = {
+      supervisor: async () => {
+        supervisorCalls++;
+        // Route to different agents that all fail
+        const targets = ["researcher", "coder", "test_gen", "reviewer"];
+        return { nextAgent: targets[supervisorCalls - 1] ?? "finish" };
+      },
+      researcher: async () => { throw new Error("fail1"); },
+      coder: async () => { throw new Error("fail2"); },
+      test_gen: async () => { throw new Error("fail3"); },
+      reviewer: async () => ({ nextAgent: "finish" }),
+    };
+
+    const graph = buildGraph({ nodes, entryPoint: "supervisor", maxSteps: 30 });
+    const state = createInitialState("test multi-failure");
+    const stream = mockStream();
+    const result = await graph.run(state, mockModel, stream, mockToken());
+
+    // Should have stopped after 3 failures
+    expect(result.state.errors.length).toBeGreaterThanOrEqual(3);
+    const mdCalls = (stream.markdown as jest.Mock).mock.calls.map((c: any[]) => c[0]);
+    expect(mdCalls.some((m: string) => m.includes("Too many agents failed"))).toBe(true);
+  });
+});
