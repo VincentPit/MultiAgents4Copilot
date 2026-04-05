@@ -90,6 +90,196 @@ export const AGENT_DISPLAY: Record<string, { icon: string; label: string }> = {
   test_gen:    { icon: "🧪", label: "Test Generator" },
 };
 
+// ── Progress Tracker ──────────────────────────────────────────────────
+
+/** Status for a tracked agent in the progress display. */
+type AgentStatus = "pending" | "running" | "done" | "error";
+
+interface TrackedAgent {
+  name: string;
+  status: AgentStatus;
+  startMs: number;
+  endMs?: number;
+  error?: string;
+}
+
+/**
+ * Real-time progress tracker that shows a live loading bar + elapsed time
+ * for each agent as it runs, using stream.progress() for the spinner line
+ * and stream.markdown() for the persistent status board.
+ */
+export class ProgressTracker {
+  private agents: TrackedAgent[] = [];
+  private stream: vscode.ChatResponseStream;
+  private graphStartMs: number;
+  private tickTimer: ReturnType<typeof setInterval> | undefined;
+
+  constructor(stream: vscode.ChatResponseStream, graphStartMs: number) {
+    this.stream = stream;
+    this.graphStartMs = graphStartMs;
+  }
+
+  /** Mark an agent as running and start the live progress tick. */
+  startAgent(name: string): void {
+    // Remove any existing entry for this agent (re-run scenario)
+    this.agents = this.agents.filter(a => !(a.name === name && a.status === "pending"));
+    this.agents.push({ name, status: "running", startMs: Date.now() });
+    this.emitProgressLine();
+    this.startTick();
+  }
+
+  /** Mark an agent as completed. */
+  completeAgent(name: string, durationMs: number): void {
+    const agent = this.findRunning(name);
+    if (agent) {
+      agent.status = "done";
+      agent.endMs = agent.startMs + durationMs;
+    }
+    this.stopTick();
+    this.emitProgressLine();
+    this.emitAgentCompletionCard(name, durationMs);
+  }
+
+  /** Mark an agent as failed. */
+  failAgent(name: string, durationMs: number, error: string): void {
+    const agent = this.findRunning(name);
+    if (agent) {
+      agent.status = "error";
+      agent.endMs = agent.startMs + durationMs;
+      agent.error = error;
+    }
+    this.stopTick();
+    this.emitProgressLine();
+  }
+
+  /** Start multiple agents for parallel execution. */
+  startParallelAgents(names: string[]): void {
+    for (const name of names) {
+      this.agents.push({ name, status: "running", startMs: Date.now() });
+    }
+    this.emitProgressLine();
+    this.startTick();
+  }
+
+  /** Mark one parallel agent as completed. */
+  completeParallelAgent(name: string, durationMs: number): void {
+    const agent = this.findRunning(name);
+    if (agent) {
+      agent.status = "done";
+      agent.endMs = agent.startMs + durationMs;
+    }
+    // Update the progress line but don't stop tick (others may still be running)
+    this.emitProgressLine();
+  }
+
+  /** Mark one parallel agent as failed. */
+  failParallelAgent(name: string, durationMs: number, error: string): void {
+    const agent = this.findRunning(name);
+    if (agent) {
+      agent.status = "error";
+      agent.endMs = agent.startMs + durationMs;
+      agent.error = error;
+    }
+    this.emitProgressLine();
+  }
+
+  /** Stop the parallel tick (call after all parallel agents are done). */
+  endParallelBatch(): void {
+    this.stopTick();
+  }
+
+  /** Clean up any running timers. */
+  dispose(): void {
+    this.stopTick();
+  }
+
+  // ── Private helpers ──
+
+  private findRunning(name: string): TrackedAgent | undefined {
+    return this.agents.find(a => a.name === name && a.status === "running");
+  }
+
+  /** Emit a stream.progress() line showing all currently running agents with elapsed times. */
+  private emitProgressLine(): void {
+    const now = Date.now();
+    const running = this.agents.filter(a => a.status === "running");
+    if (running.length === 0) {
+      // Show total elapsed
+      const elapsed = formatDurationShort(now - this.graphStartMs);
+      this.stream.progress(`✨ Processing complete — ${elapsed} total`);
+      return;
+    }
+
+    if (running.length === 1) {
+      const a = running[0];
+      const display = AGENT_DISPLAY[a.name] ?? { icon: "⚙️", label: a.name };
+      const elapsed = formatDurationShort(now - a.startMs);
+      const bar = renderMiniBar(now - a.startMs, agentTimeout(a.name));
+      this.stream.progress(`${display.icon} ${display.label}  ${bar}  ${elapsed}`);
+    } else {
+      // Multiple agents running in parallel
+      const parts = running.map(a => {
+        const display = AGENT_DISPLAY[a.name] ?? { icon: "⚙️", label: a.name };
+        const elapsed = formatDurationShort(now - a.startMs);
+        return `${display.icon} ${elapsed}`;
+      });
+      this.stream.progress(`⚡ Parallel: ${parts.join("  ·  ")}`);
+    }
+  }
+
+  /** Show a small completion card in markdown after a sequential agent finishes. */
+  private emitAgentCompletionCard(name: string, durationMs: number): void {
+    const display = AGENT_DISPLAY[name] ?? { icon: "⚙️", label: name };
+    const bar = renderProgressBar(durationMs, agentTimeout(name), 20);
+    const elapsed = formatDurationShort(durationMs);
+
+    // Don't show cards for supervisor (too noisy — it runs many times)
+    if (name === "supervisor") { return; }
+
+    this.stream.markdown(
+      `> ${display.icon} **${display.label}**  ·  \`${bar}\`  **${elapsed}**\n\n`
+    );
+  }
+
+  /** Start a periodic tick that updates the progress spinner with elapsed time. */
+  private startTick(): void {
+    if (this.tickTimer) { return; } // Already running
+    this.tickTimer = setInterval(() => {
+      this.emitProgressLine();
+    }, 1_000); // Update every second
+  }
+
+  /** Stop the periodic tick. */
+  private stopTick(): void {
+    if (this.tickTimer) {
+      clearInterval(this.tickTimer);
+      this.tickTimer = undefined;
+    }
+  }
+}
+
+/** Render a progress bar using Unicode blocks: ▓▓▓▓▓░░░░░ */
+function renderProgressBar(elapsedMs: number, timeoutMs: number, width: number = 20): string {
+  const fraction = Math.min(elapsedMs / timeoutMs, 1);
+  const filled = Math.round(fraction * width);
+  const empty = width - filled;
+  return "▓".repeat(filled) + "░".repeat(empty);
+}
+
+/** Render a compact mini-bar for the progress spinner line. */
+function renderMiniBar(elapsedMs: number, timeoutMs: number): string {
+  return `[${renderProgressBar(elapsedMs, timeoutMs, 15)}]`;
+}
+
+/** Format duration as compact string (e.g., "3.2s", "1m 23s"). */
+function formatDurationShort(ms: number): string {
+  if (ms < 1000) { return `${ms}ms`; }
+  if (ms < 60_000) { return `${(ms / 1000).toFixed(1)}s`; }
+  const m = Math.floor(ms / 60_000);
+  const s = Math.round((ms % 60_000) / 1000);
+  return `${m}m ${s}s`;
+}
+
 /**
  * Build and return a compiled graph executor.
  */
@@ -98,13 +288,15 @@ export function buildGraph(config: GraphConfig) {
 
   /**
    * Run a single agent node with timing and error handling.
+   * Optionally accepts a ProgressTracker for live progress updates.
    */
   async function runNode(
     name: string,
     state: AgentState,
     model: vscode.LanguageModelChat,
     stream: vscode.ChatResponseStream,
-    token: vscode.CancellationToken
+    token: vscode.CancellationToken,
+    tracker?: ProgressTracker
   ): Promise<{ update: Partial<AgentState>; durationMs: number; error?: string }> {
     const nodeFn = nodes[name];
     if (!nodeFn) {
@@ -150,7 +342,8 @@ export function buildGraph(config: GraphConfig) {
     state: AgentState,
     model: vscode.LanguageModelChat,
     stream: vscode.ChatResponseStream,
-    token: vscode.CancellationToken
+    token: vscode.CancellationToken,
+    tracker?: ProgressTracker
   ): Promise<{ mergedUpdate: Partial<AgentState>; runs: AgentRun[]; errors: string[] }> {
     const labels = agentNames.map(n => {
       const d = AGENT_DISPLAY[n] ?? { icon: "⚙️", label: n };
@@ -158,13 +351,28 @@ export function buildGraph(config: GraphConfig) {
     });
 
     stream.markdown(
-      `\n> 🔀 **Parallel execution:** ${labels.join(" + ")}\n\n`
+      `\n> ⚡ **Parallel execution:** ${labels.join(" + ")}\n\n`
     );
+
+    // Start tracking all parallel agents
+    if (tracker) {
+      tracker.startParallelAgents(agentNames);
+    }
 
     // Launch all agents concurrently with an immutable state snapshot
     const stateSnapshot = frozenSnapshot(state);
     const promises = agentNames.map(name =>
-      runNode(name, stateSnapshot, model, stream, token)
+      runNode(name, stateSnapshot, model, stream, token).then(result => {
+        // Update tracker as each agent finishes
+        if (tracker) {
+          if (result.error) {
+            tracker.failParallelAgent(name, result.durationMs, result.error);
+          } else {
+            tracker.completeParallelAgent(name, result.durationMs);
+          }
+        }
+        return result;
+      })
     );
 
     const results = await Promise.allSettled(promises);
@@ -201,9 +409,13 @@ export function buildGraph(config: GraphConfig) {
     stream.markdown(
       `\n> ✅ **Parallel batch complete:** ${runs.filter(r => !errors.some(e => e.startsWith(r.name))).map(r => {
         const d = AGENT_DISPLAY[r.name] ?? { icon: "⚙️", label: r.name };
-        return d.icon;
-      }).join(" ")} finished\n\n`
+        return `${d.icon} ${formatDurationShort(r.durationMs)}`;
+      }).join("  ·  ")} \n\n`
     );
+
+    if (tracker) {
+      tracker.endParallelBatch();
+    }
 
     return { mergedUpdate: merged, runs, errors };
   }
@@ -223,6 +435,9 @@ export function buildGraph(config: GraphConfig) {
     let steps = 0;
     const agentRuns: AgentRun[] = [];
     const graphStart = Date.now();
+
+    // ── Live progress tracker ──
+    const tracker = new ProgressTracker(stream, graphStart);
 
     // Track consecutive failures to prevent loops
     const failedAgents = new Set<string>();
@@ -260,12 +475,13 @@ export function buildGraph(config: GraphConfig) {
       }
 
       const display = AGENT_DISPLAY[currentNode] ?? { icon: "⚙️", label: currentNode };
-      stream.progress(`${display.icon} Running ${display.label}…`);
+      tracker.startAgent(currentNode);
 
       // ── Run the current node ──
-      const { update, durationMs, error } = await runNode(currentNode, state, model, stream, token);
+      const { update, durationMs, error } = await runNode(currentNode, state, model, stream, token, tracker);
 
       if (error) {
+        tracker.failAgent(currentNode, durationMs, error);
         stream.markdown(`\n\n> ⚠️ **${display.label}** encountered an error: ${error}\n`);
         state.errors = [...(state.errors ?? []), `${currentNode}: ${error}`];
         failedAgents.add(currentNode);
@@ -304,6 +520,7 @@ export function buildGraph(config: GraphConfig) {
       }
 
       failedAgents.delete(currentNode);
+      tracker.completeAgent(currentNode, durationMs);
       agentRuns.push({ name: currentNode, durationMs });
       state = mergeState(state, update);
       steps++;
@@ -372,7 +589,7 @@ export function buildGraph(config: GraphConfig) {
         }
 
         const { mergedUpdate, runs, errors } = await runParallel(
-          validAgents, state, model, stream, token
+          validAgents, state, model, stream, token, tracker
         );
 
         agentRuns.push(...runs);
@@ -414,6 +631,9 @@ export function buildGraph(config: GraphConfig) {
       stream.markdown(`\n\n> ⚠️ Reached maximum step limit (${maxSteps}). Stopping.\n`);
       state.status = "completed";
     }
+
+    // Clean up the progress tracker
+    tracker.dispose();
 
     return {
       state,

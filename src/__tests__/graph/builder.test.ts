@@ -3,7 +3,7 @@
  */
 
 import * as vscode from "vscode";
-import { buildGraph, AGENT_DISPLAY, type AgentNode, type GraphResult } from "../../graph/builder.js";
+import { buildGraph, AGENT_DISPLAY, ProgressTracker, type AgentNode, type GraphResult } from "../../graph/builder.js";
 import { createInitialState, mergeState, type AgentState } from "../../graph/state.js";
 
 // The mock already returns a model from selectChatModels
@@ -549,5 +549,138 @@ describe("buildGraph — coder_pool fallback", () => {
     expect(result.state.errors.length).toBeGreaterThanOrEqual(3);
     const mdCalls = (stream.markdown as jest.Mock).mock.calls.map((c: any[]) => c[0]);
     expect(mdCalls.some((m: string) => m.includes("Too many agents failed"))).toBe(true);
+  });
+});
+
+// ── ProgressTracker unit tests ──────────────────────────────────────
+
+describe("ProgressTracker", () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it("emits progress line when agent starts", () => {
+    const stream = mockStream();
+    const tracker = new ProgressTracker(stream, Date.now());
+
+    tracker.startAgent("planner");
+
+    expect((stream.progress as jest.Mock).mock.calls.length).toBeGreaterThanOrEqual(1);
+    const lastCall = (stream.progress as jest.Mock).mock.calls.at(-1)?.[0] as string;
+    expect(lastCall).toContain("📋");
+    expect(lastCall).toContain("Planner");
+
+    tracker.dispose();
+  });
+
+  it("emits completion card in markdown for non-supervisor agents", () => {
+    const stream = mockStream();
+    const tracker = new ProgressTracker(stream, Date.now());
+
+    tracker.startAgent("coder");
+    tracker.completeAgent("coder", 2500);
+
+    const mdCalls = (stream.markdown as jest.Mock).mock.calls.map((c: any[]) => c[0]);
+    // Completion card should mention the agent name and contain the bar character
+    const card = mdCalls.find((m: string) => m.includes("Coder"));
+    expect(card).toBeDefined();
+    expect(card).toMatch(/[▓░]/);
+
+    tracker.dispose();
+  });
+
+  it("does NOT emit completion card for supervisor (too noisy)", () => {
+    const stream = mockStream();
+    const tracker = new ProgressTracker(stream, Date.now());
+
+    tracker.startAgent("supervisor");
+    tracker.completeAgent("supervisor", 1000);
+
+    const mdCalls = (stream.markdown as jest.Mock).mock.calls.map((c: any[]) => c[0]);
+    // Should NOT have a supervisor completion card
+    expect(mdCalls.some((m: string) => m.includes("Supervisor") && m.includes("▓"))).toBe(false);
+
+    tracker.dispose();
+  });
+
+  it("shows parallel progress for multiple agents", () => {
+    const stream = mockStream();
+    const tracker = new ProgressTracker(stream, Date.now());
+
+    tracker.startParallelAgents(["coder", "researcher"]);
+
+    const lastCall = (stream.progress as jest.Mock).mock.calls.at(-1)?.[0] as string;
+    expect(lastCall).toContain("Parallel");
+
+    tracker.completeParallelAgent("coder", 3000);
+    tracker.completeParallelAgent("researcher", 4000);
+    tracker.endParallelBatch();
+
+    tracker.dispose();
+  });
+
+  it("updates progress line periodically via tick timer", () => {
+    const stream = mockStream();
+    const tracker = new ProgressTracker(stream, Date.now());
+
+    tracker.startAgent("planner");
+    const initialCalls = (stream.progress as jest.Mock).mock.calls.length;
+
+    // Advance fake timers by 3 seconds (3 ticks)
+    jest.advanceTimersByTime(3000);
+
+    const afterTickCalls = (stream.progress as jest.Mock).mock.calls.length;
+    expect(afterTickCalls).toBeGreaterThan(initialCalls);
+
+    tracker.dispose();
+  });
+
+  it("dispose() clears the tick timer", () => {
+    const stream = mockStream();
+    const tracker = new ProgressTracker(stream, Date.now());
+
+    tracker.startAgent("coder");
+    tracker.dispose();
+
+    const callsAfterDispose = (stream.progress as jest.Mock).mock.calls.length;
+
+    // Advance timers — should NOT produce new calls
+    jest.advanceTimersByTime(5000);
+
+    expect((stream.progress as jest.Mock).mock.calls.length).toBe(callsAfterDispose);
+  });
+
+  it("shows error status when agent fails", () => {
+    const stream = mockStream();
+    const tracker = new ProgressTracker(stream, Date.now());
+
+    tracker.startAgent("coder");
+    tracker.failAgent("coder", 500, "timeout");
+
+    // Progress line should have been updated
+    expect((stream.progress as jest.Mock).mock.calls.length).toBeGreaterThanOrEqual(2);
+
+    tracker.dispose();
+  });
+
+  it("progress bar renders correctly", () => {
+    const stream = mockStream();
+    const tracker = new ProgressTracker(stream, Date.now());
+
+    // Agent that completed — the completion card should contain block chars
+    tracker.startAgent("researcher");
+    tracker.completeAgent("researcher", 60_000); // 60s of 120s timeout = ~half
+
+    const mdCalls = (stream.markdown as jest.Mock).mock.calls.map((c: any[]) => c[0]);
+    const card = mdCalls.find((m: string) => m.includes("Researcher") && m.includes("▓"));
+    expect(card).toBeDefined();
+    // Should contain both filled and empty blocks
+    expect(card).toContain("▓");
+    expect(card).toContain("░");
+
+    tracker.dispose();
   });
 });
