@@ -5,7 +5,7 @@
 
 import * as vscode from "vscode";
 import { AgentState, AgentMessage, postAgentMessage } from "../graph/state";
-import { callModel, buildMessages, capContext } from "./base";
+import { callModel, buildMessages, capContext, sanitizeLLMInput } from "./base";
 import { logger } from "../utils/logger";
 import {
   searchGitHubRepos,
@@ -114,10 +114,12 @@ export async function researcherNode(
     fullSystemPrompt += repoContextForLLM(allResults);
   }
   // Cap workspace context injected into system prompt to avoid 400s
+  // Sanitize to strip LLM instruction markers that could be in file contents
   if (state.workspaceContext) {
-    const wsCtx = state.workspaceContext.length > 8000
-      ? state.workspaceContext.slice(0, 8000) + "\n[… workspace context truncated]"
-      : state.workspaceContext;
+    let wsCtx = sanitizeLLMInput(state.workspaceContext);
+    wsCtx = wsCtx.length > 8000
+      ? wsCtx.slice(0, 8000) + "\n[… workspace context truncated]"
+      : wsCtx;
     fullSystemPrompt += `\n\n${wsCtx}`;
   }
 

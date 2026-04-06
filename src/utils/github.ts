@@ -35,7 +35,8 @@ export interface GitHubSearchResult {
 
 async function getGitHubToken(): Promise<string | null> {
   try {
-    const session = await vscode.authentication.getSession("github", ["repo"], {
+    // Only request public_repo scope — we only do search queries, not write operations
+    const session = await vscode.authentication.getSession("github", ["public_repo"], {
       createIfNone: false,
       silent: true,
     });

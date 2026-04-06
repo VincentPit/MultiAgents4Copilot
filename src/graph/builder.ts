@@ -683,13 +683,13 @@ function determineRoute(
   }
 
   // ── After any other agent: advance the plan and chain to next step ──
-  // This is the critical fix: instead of bouncing back to supervisor
-  // (which wastes an LLM call and then re-routes to the same plan step
-  // because planStep never advanced), we advance planStep here and go
-  // directly to the next plan step's agent.
+  // Advance planStep here so subsequent routeFromPlan() picks up the
+  // correct next step. We never mutate planStep elsewhere (the main
+  // loop only advances after parallel batches to mirror this logic).
   if (state.plan.length > 0 && state.planStep < state.plan.length) {
-    state.planStep++;
-    logger.info("route", `Plan step advanced to ${state.planStep}/${state.plan.length}`);
+    const advancedStep = state.planStep + 1;
+    state.planStep = advancedStep;
+    logger.info("route", `Plan step advanced to ${advancedStep}/${state.plan.length}`);
 
     if (state.planStep < state.plan.length) {
       const nextPlanRoute = routeFromPlan(state);

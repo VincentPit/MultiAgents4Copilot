@@ -243,28 +243,11 @@ export function mergeState(
 }
 
 /**
- * Create an immutable snapshot of the state for safe use in parallel agents.
- * Uses structured clone + Object.freeze to prevent cross-contamination.
+ * Create an immutable deep snapshot of the state for safe use in parallel agents.
+ * Uses structuredClone for a true deep copy, then Object.freeze to prevent mutation.
+ * This ensures no shared references between parallel agents.
  */
 export function frozenSnapshot(state: AgentState): Readonly<AgentState> {
-  const clone: AgentState = {
-    messages: [...state.messages],
-    nextAgent: state.nextAgent,
-    pendingAgents: [...state.pendingAgents],
-    plan: [...state.plan],
-    planStep: state.planStep,
-    artifacts: { ...state.artifacts },
-    reviewCount: state.reviewCount,
-    finalAnswer: state.finalAnswer,
-    status: state.status,
-    reviewVerdict: state.reviewVerdict,
-    agentComms: [...state.agentComms],
-    errors: [...state.errors],
-    workspaceContext: state.workspaceContext,
-    references: state.references,
-    chatHistory: state.chatHistory,
-    terminalResults: [...state.terminalResults],
-    domainAssignments: [...state.domainAssignments],
-  };
+  const clone = structuredClone(state);
   return Object.freeze(clone);
 }

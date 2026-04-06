@@ -29,8 +29,8 @@ import { runIntegrityCheck, type IntegrityReport } from "./utils/integrity";
 
 const PARTICIPANT_ID = "multi-agent-copilot.team";
 
-/** Cached integrity report — checked once at activation. */
-let _integrityReport: IntegrityReport | null = null;
+/** Cached integrity report promise — checked once at activation, awaited in handler. */
+let _integrityPromise: Promise<IntegrityReport> | null = null;
 
 export function activate(context: vscode.ExtensionContext) {
   const agent = vscode.chat.createChatParticipant(PARTICIPANT_ID, handler);
@@ -55,17 +55,22 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(agent);
   logger.info("extension", "Multi-Agent Copilot activated (v0.7.0)");
 
-  // Run module integrity check asynchronously at activation
-  runIntegrityCheck().then(report => {
-    _integrityReport = report;
+  // Run module integrity check asynchronously at activation.
+  // The promise is awaited in the chat handler to ensure the check
+  // completes before any user request is processed.
+  _integrityPromise = runIntegrityCheck().catch(err => {
+    logger.error("integrity", `Integrity check threw: ${err}`);
+    // Return a passing report on check failure so we don't block the user
+    return { ok: true, failures: [], checkedCount: 0, passed: [] } as IntegrityReport;
+  });
+
+  _integrityPromise.then(report => {
     if (!report.ok) {
       const failList = report.failures.map(f => `${f.module}.${f.export}`).join(", ");
       vscode.window.showErrorMessage(
         `Multi-Agent Copilot: Module integrity check failed (${report.failures.length} issue(s): ${failList}). The extension may not work correctly.`
       );
     }
-  }).catch(err => {
-    logger.error("integrity", `Integrity check threw: ${err}`);
   });
 }
 
@@ -92,9 +97,12 @@ const handler: vscode.ChatRequestHandler = async (
   token: vscode.CancellationToken
 ): Promise<void> => {
   // 0. Gate: abort early if module integrity check failed
-  if (_integrityReport && !_integrityReport.ok) {
-    const failList = _integrityReport.failures
-      .map(f => `\`${f.module}.${f.export}\` (expected ${f.expected}, got ${f.actual})`)
+  //    Await the promise so we don't bypass the check during startup
+  const integrityReport = _integrityPromise ? await _integrityPromise : null;
+  if (integrityReport && !integrityReport.ok) {
+    const failList = integrityReport.failures
+      .map((f: { module: string; export: string; expected: string; actual: string }) =>
+        `\`${f.module}.${f.export}\` (expected ${f.expected}, got ${f.actual})`)
       .join("\n- ");
     stream.markdown(
       `## ⛔ Module Integrity Failure\n\n` +

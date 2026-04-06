@@ -165,7 +165,7 @@ describe("runCommandsFromOutput — real execution", () => {
     expect(result.executed[2].success).toBe(true);
   }, 15_000);
 
-  it("shows commands in the integrated terminal", async () => {
+  it("shows command output in the integrated terminal (display only, no re-execution)", async () => {
     const llmOutput = "```bash\necho test\n```";
     const stream = mockStream();
 
@@ -173,9 +173,13 @@ describe("runCommandsFromOutput — real execution", () => {
 
     // createTerminal should have been called
     expect(mockCreateTerminal).toHaveBeenCalled();
-    // Terminal's sendText should have received the command
+    // Terminal's sendText should show command info (not re-execute it)
     const terminal = mockCreateTerminal.mock.results[0].value;
-    expect(terminal.sendText).toHaveBeenCalledWith("echo test");
+    const allCalls = (terminal.sendText as jest.Mock).mock.calls.map((c: any[]) => c[0]);
+    const joined = allCalls.join("\n");
+    expect(joined).toContain("echo test");
+    // Should NOT be a bare sendText("echo test") — it should be prefixed as a comment
+    expect(terminal.sendText).not.toHaveBeenCalledWith("echo test");
   }, 15_000);
 
   it("streams progress and result markdown", async () => {

@@ -154,7 +154,18 @@ export async function countTokens(
   try {
     return await model.countTokens(text, token);
   } catch {
-    const str = typeof text === "string" ? text : "";
+    // Fallback: estimate from string content (4 chars ≈ 1 token)
+    let str: string;
+    if (typeof text === "string") {
+      str = text;
+    } else {
+      // Extract text content from a LanguageModelChatMessage
+      try {
+        str = (text as any).content ?? JSON.stringify(text);
+      } catch {
+        str = "";
+      }
+    }
     return Math.ceil(str.length / 4);
   }
 }
@@ -298,6 +309,18 @@ export function capContext(ctx: string, maxChars: number = 20_000): string {
   return ctx.slice(0, maxChars) + "\n[… context truncated to fit]";
 }
 
+/**
+ * Strip known LLM instruction markers that could be injected via
+ * file contents, chat history, or workspace context.
+ * Catches ChatML, Llama, and generic `<|...|>` delimiters.
+ */
+export function sanitizeLLMInput(s: string): string {
+  return s
+    .replace(/<\|[^|]*\|>/g, "[filtered]")           // All <|...|> markers (ChatML, etc.)
+    .replace(/<<\/?SYS>>/gi, "[filtered]")            // Llama <<SYS>> / <</SYS>>
+    .replace(/\[\/?INST\]/gi, "[filtered]");           // Llama [INST] / [/INST]
+}
+
 export function sysMsg(content: string): vscode.LanguageModelChatMessage {
   return vscode.LanguageModelChatMessage.User(`[SYSTEM INSTRUCTIONS]\n${content}`);
 }
@@ -337,8 +360,7 @@ export function buildMessages(opts: {
 
   // Sanitize inputs — strip known LLM instruction markers that could
   // be injected via file contents or chat history
-  const sanitize = (s: string): string =>
-    s.replace(/<\|im_start\|>|<\|im_end\|>|<<SYS>>|<<\/SYS>>|\[INST\]|\[\/INST\]/gi, "[filtered]");
+  const sanitize = sanitizeLLMInput;
 
   let combined = capContext(opts.systemPrompt, maxSys);
   if (opts.references) {

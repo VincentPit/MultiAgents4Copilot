@@ -86,9 +86,22 @@ export async function uiDesigner(
     `UI design produced. Components for tests:\n${capContext(response, 4_000)}`);
   logger.agentMessage("ui_designer", "*", "Design spec posted to message bus");
 
+  // Extract only code blocks from the response for last_code artifact,
+  // so the reviewer reviews actual code, not design prose
+  const codeBlocks: string[] = [];
+  const codeBlockRegex = /```[\w]*\n([\s\S]*?)```/g;
+  let codeMatch;
+  while ((codeMatch = codeBlockRegex.exec(response)) !== null) {
+    if (codeMatch[1]?.trim()) { codeBlocks.push(codeMatch[1].trim()); }
+  }
+  const extractedCode = codeBlocks.length > 0 ? codeBlocks.join("\n\n") : "";
+
   return {
     messages: [newMessage],
-    artifacts: { ui_design: cappedResponse, last_code: cappedResponse },
+    artifacts: {
+      ui_design: cappedResponse,
+      ...(extractedCode ? { last_code: extractedCode } : {}),
+    },
     nextAgent: "supervisor",
   };
 }

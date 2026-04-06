@@ -61,7 +61,7 @@ export interface WriteResult {
  *   // code                // code
  *   ```                    ```
  */
-const FENCE_RE = /```(\S*)\n([\s\S]*?)```/g;
+const FENCE_PATTERN = /```(\S*)\n([\s\S]*?)```/g;
 
 /**
  * Patterns that can appear on the line(s) BEFORE a code fence to indicate
@@ -88,11 +88,11 @@ export function parseFileBlocks(llmOutput: string): ParsedFileBlock[] {
   const blocks: ParsedFileBlock[] = [];
   const lines = llmOutput.split("\n");
 
-  // Reset regex state
-  FENCE_RE.lastIndex = 0;
+  // Create fresh regex each call to avoid shared /g lastIndex state
+  const fenceRe = new RegExp(FENCE_PATTERN.source, FENCE_PATTERN.flags);
 
   let match: RegExpExecArray | null;
-  while ((match = FENCE_RE.exec(llmOutput)) !== null) {
+  while ((match = fenceRe.exec(llmOutput)) !== null) {
     const langAnnotation = match[1] ?? "";
     const codeContent = match[2];
 

@@ -63,8 +63,8 @@ export interface RunResult {
 /** Shell language tags that indicate a runnable command. */
 const SHELL_LANGS = new Set(["bash", "sh", "shell", "zsh", "cmd", "powershell", "ps1", "terminal", "console"]);
 
-/** Regex to match fenced code blocks. */
-const FENCE_RE = /```(\S*)\n([\s\S]*?)```/g;
+/** Regex pattern for fenced code blocks (created fresh per call to avoid /g state bugs). */
+const FENCE_PATTERN = /```(\S*)\n([\s\S]*?)```/g;
 
 /**
  * Parse shell command blocks from LLM output.
@@ -72,10 +72,11 @@ const FENCE_RE = /```(\S*)\n([\s\S]*?)```/g;
  */
 export function parseCommandBlocks(llmOutput: string): ParsedCommand[] {
   const commands: ParsedCommand[] = [];
-  FENCE_RE.lastIndex = 0;
+  // Create a fresh regex each call to avoid shared /g lastIndex state
+  const fenceRe = new RegExp(FENCE_PATTERN.source, FENCE_PATTERN.flags);
 
   let match: RegExpExecArray | null;
-  while ((match = FENCE_RE.exec(llmOutput)) !== null) {
+  while ((match = fenceRe.exec(llmOutput)) !== null) {
     const lang = (match[1] ?? "").toLowerCase().split(":")[0];
     const content = match[2]?.trim();
 
@@ -227,7 +228,10 @@ async function executeCommand(
       env: { ...process.env, FORCE_COLOR: "0" }, // disable colour codes
       shell: process.platform === "win32" ? "cmd.exe" : "/bin/bash",
     }, (error, stdout, stderr) => {
-      const exitCode = error?.code ?? (proc.exitCode ?? 0);
+      // error.code can be a string (e.g., 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER')
+      // so we must check the type before using it as exit code
+      const rawCode = error?.code;
+      const exitCode = typeof rawCode === "number" ? rawCode : (proc.exitCode ?? (error ? 1 : 0));
 
       // Detect timeout
       if (error && "killed" in error && error.killed) {
@@ -260,16 +264,32 @@ async function executeCommand(
 }
 
 /**
- * Also show the command running in the VS Code integrated terminal
- * so the user can see real-time output.
+ * Show the command output in the VS Code integrated terminal.
+ *
+ * IMPORTANT: We do NOT call `terminal.sendText(command)` because that would
+ * execute the command a second time (child_process.exec already runs it).
+ * Instead, we only display the command + captured output for visibility.
  */
-function showInTerminal(command: string, workspaceRoot: string): vscode.Terminal {
+function showCommandOutput(
+  command: string,
+  result: CommandResult,
+  workspaceRoot: string,
+): vscode.Terminal {
   const terminal = vscode.window.createTerminal({
     name: "🤖 Agent Command",
     cwd: workspaceRoot,
   });
   terminal.show(true); // preserve focus on chat
-  terminal.sendText(command);
+  // Display what was run and the output — do NOT re-execute
+  terminal.sendText(`# Command executed by agent:`, false);
+  terminal.sendText(`# $ ${command}`, false);
+  if (result.stdout) {
+    terminal.sendText(result.stdout, false);
+  }
+  if (result.stderr) {
+    terminal.sendText(result.stderr, false);
+  }
+  terminal.sendText(`# Exit code: ${result.exitCode ?? "N/A"}`, false);
   return terminal;
 }
 
@@ -339,15 +359,17 @@ export async function runCommandsFromOutput(
   // Execute approved commands sequentially
   stream.markdown(`\n> 🖥️ **Running ${approved.length} command(s)…**\n`);
 
+  const pendingTerminals: vscode.Terminal[] = [];
+
   for (const cmd of approved) {
     stream.progress(`Running: ${cmd.command}`);
 
-    // Show in integrated terminal for real-time output
-    const terminal = showInTerminal(cmd.command, workspaceRoot);
-
-    // Also execute via child_process to capture output
+    // Execute via child_process to capture output
     const cmdResult = await executeCommand(cmd.command, workspaceRoot);
     result.executed.push(cmdResult);
+
+    // Show in integrated terminal for visibility (does NOT re-execute)
+    const terminal = showCommandOutput(cmd.command, cmdResult, workspaceRoot);
 
     // Stream result back to the chat
     const icon = cmdResult.success ? "✅" : "❌";
@@ -369,8 +391,14 @@ export async function runCommandsFromOutput(
     // Brief delay so the user can see each command
     await new Promise((r) => setTimeout(r, 500));
 
-    // Dispose of the terminal after a short delay
-    setTimeout(() => terminal.dispose(), 30_000);
+    // Track terminal for cleanup (dispose after delay or when function exits)
+    pendingTerminals.push(terminal);
+  }
+
+  // Schedule terminal cleanup after a delay
+  for (const t of pendingTerminals) {
+    const timer = setTimeout(() => t.dispose(), 30_000);
+    if (typeof timer === "object" && "unref" in timer) { timer.unref(); }
   }
 
   // Summary
@@ -440,12 +468,15 @@ export async function runSingleCommand(
   }
 
   stream.progress(`Running: ${command}`);
-  const terminal = showInTerminal(command, workspaceRoot);
   const result = await executeCommand(command, workspaceRoot);
+
+  // Show in integrated terminal for visibility (does NOT re-execute)
+  const terminal = showCommandOutput(command, result, workspaceRoot);
 
   const icon = result.success ? "✅" : "❌";
   stream.markdown(`\n> ${icon} \`$ ${command}\` — **${result.status}**\n`);
 
-  setTimeout(() => terminal.dispose(), 30_000);
+  const disposeTimer = setTimeout(() => terminal.dispose(), 30_000);
+  if (typeof disposeTimer === "object" && "unref" in disposeTimer) { disposeTimer.unref(); }
   return result;
 }
