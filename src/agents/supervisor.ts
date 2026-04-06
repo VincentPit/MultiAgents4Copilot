@@ -82,6 +82,13 @@ export async function supervisorNode(
     (failedAgentNames.length > 0
       ? `FAILED AGENTS (do NOT route to these): ${failedAgentNames.join(", ")}\n`
       : "") +
+    // ── Inject build state so the supervisor knows if code is broken ──
+    (state.artifacts["build_status"]
+      ? `Build status: ${state.artifacts["build_status"]}\n`
+      : "") +
+    (state.artifacts["build_errors"]
+      ? `⚠️ BUILD HAS ERRORS — code needs fixing before review.\n`
+      : "") +
     `Last output: ${lastSnippet}\n` +
     `Which agent(s) next? Use commas for parallel work.`;
 

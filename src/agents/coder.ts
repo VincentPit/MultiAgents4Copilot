@@ -12,6 +12,7 @@ import { callModel, buildMessages, capContext } from "./base";
 import { logger } from "../utils/logger";
 import { applyCodeToWorkspace } from "../utils/fileWriter";
 import { runCommandsFromOutput, type CommandResult } from "../utils/terminalRunner";
+import { runBuildValidation, formatBuildErrorsForLLM, type BuildResult } from "../utils/buildValidator";
 import type { TerminalResult } from "../graph/state";
 
 const SYSTEM_PROMPT = `You are the Coder agent — an expert software engineer who writes real files.
@@ -98,8 +99,6 @@ export async function coderNode(
   logger.agentMessage("coder", "*", "Code posted to message bus");
 
   // ── Apply code blocks to the workspace ──────────────────────────────
-  // Parse fenced code blocks from the LLM response, extract file paths,
-  // and write them to disk. This is the key difference from a chat-only agent.
   let writtenFiles: string[] = [];
   try {
     const result = await applyCodeToWorkspace(response, stream);
@@ -114,8 +113,74 @@ export async function coderNode(
     logger.error("coder", `File write failed: ${errMsg}`);
     stream.markdown(`\n> ⚠️ Failed to apply code changes: ${errMsg}\n`);
   }
+
+  // ── Build validation + error-feedback retry loop ────────────────────
+  // After writing files, validate the build. If errors are found, feed
+  // them back to the LLM so it can self-correct. Max 2 retries.
+  const MAX_FIX_RETRIES = 2;
+  let buildResult: BuildResult | null = null;
+  let lastResponse = response;
+
+  if (writtenFiles.length > 0) {
+    const wsRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (wsRoot) {
+      for (let attempt = 0; attempt <= MAX_FIX_RETRIES; attempt++) {
+        if (token.isCancellationRequested) { break; }
+
+        buildResult = await runBuildValidation(wsRoot);
+
+        if (buildResult.success) {
+          stream.markdown(`\n> ✅ **Build validation passed** — no compilation errors.\n`);
+          break;
+        }
+
+        if (attempt >= MAX_FIX_RETRIES) {
+          stream.markdown(
+            `\n> ⚠️ **Build still failing** after ${MAX_FIX_RETRIES} fix attempt(s). ` +
+            `${buildResult.errorCount} error(s) remain. Proceeding anyway.\n`
+          );
+          break;
+        }
+
+        // ── Feed errors back to the LLM for self-correction ──
+        const errorReport = formatBuildErrorsForLLM(buildResult);
+        stream.markdown(
+          `\n> 🔧 **Build failed** (${buildResult.errorCount} error(s)) — ` +
+          `asking coder to fix (attempt ${attempt + 1}/${MAX_FIX_RETRIES})…\n`
+        );
+
+        const fixMessages = buildMessages({
+          systemPrompt: SYSTEM_PROMPT + `\n\n## BUILD ERRORS — FIX THESE NOW\n` +
+            `Your previous code produced the following compilation errors.\n` +
+            `Rewrite ONLY the files that have errors. Include the COMPLETE fixed file contents.\n` +
+            `Do NOT re-output files that are already correct.\n\n` + errorReport,
+          workspaceContext: state.workspaceContext,
+          references: state.references,
+          chatHistory: "",
+          userQuestion: `Fix the ${buildResult.errorCount} build error(s) shown above. ` +
+            `Output only the corrected files using ### \`path\` format.`,
+          maxSystemChars: 16_000,
+          maxWorkspaceChars: 6_000,
+          maxReferencesChars: 6_000,
+        });
+
+        const fixResponse = await callModel(model, fixMessages, stream, token, `coder-fix-${attempt + 1}`);
+        lastResponse = fixResponse;
+
+        try {
+          const fixResult = await applyCodeToWorkspace(fixResponse, stream);
+          if (fixResult.written.length > 0) {
+            writtenFiles.push(...fixResult.written);
+            logger.info("coder", `Fix attempt ${attempt + 1}: wrote ${fixResult.written.length} file(s)`);
+          }
+        } catch (err: any) {
+          logger.error("coder", `Fix attempt ${attempt + 1} file write failed: ${err?.message}`);
+        }
+      }
+    }
+  }
+
   // ── Run terminal commands from the LLM response ──────────────────────
-  // Parse fenced bash/shell blocks and execute them with user consent.
   const terminalResults: TerminalResult[] = [];
   try {
     const cmdResult = await runCommandsFromOutput(response, stream);
@@ -136,18 +201,25 @@ export async function coderNode(
     logger.error("coder", `Terminal command execution failed: ${errMsg}`);
     stream.markdown(`\n> ⚠️ Failed to run terminal commands: ${errMsg}\n`);
   }
+
+  const cappedResponse = lastResponse.length > 6000
+    ? lastResponse.slice(0, 6000) + "\n[... code truncated in state]"
+    : lastResponse;
+
   const newMessage: AgentMessage = {
     role: "assistant",
     name: "coder",
-    content: response.length > 6000 ? response.slice(0, 6000) + "\n[... code truncated in state]" : response,
+    content: cappedResponse,
   };
 
   return {
     messages: [newMessage],
     artifacts: {
-      last_code: response,
+      last_code: lastResponse,
       ...(writtenFiles.length > 0 ? { written_files: writtenFiles.join(", ") } : {}),
       ...(terminalResults.length > 0 ? { terminal_output: terminalResults.map(r => `$ ${r.command} → ${r.success ? "OK" : "FAIL"}`).join("\n") } : {}),
+      ...(buildResult ? { build_status: buildResult.success ? "passed" : `failed:${buildResult.errorCount}` } : {}),
+      ...(buildResult && !buildResult.success ? { build_errors: formatBuildErrorsForLLM(buildResult) } : {}),
     },
     terminalResults,
   };

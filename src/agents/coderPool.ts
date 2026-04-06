@@ -29,6 +29,12 @@ import { callModel, buildMessages, capContext } from "./base";
 import { logger } from "../utils/logger";
 import { applyCodeToWorkspace } from "../utils/fileWriter";
 import { runCommandsFromOutput } from "../utils/terminalRunner";
+import {
+  runBuildValidation,
+  formatBuildErrorsForLLM,
+  filterErrorsForFiles,
+  type BuildResult,
+} from "../utils/buildValidator";
 
 // ── Prompts ──────────────────────────────────────────────────────────
 
@@ -372,6 +378,8 @@ export async function coderPoolNode(
   const allMessages: AgentMessage[] = [];
   const domainArtifacts: Record<string, string> = {};
   const errors: string[] = [];
+  /** Track which files each domain wrote (for targeted error reporting). */
+  const domainWrittenFiles: Map<string, string[]> = new Map();
 
   for (const result of results) {
     const { domain, response, durationMs, error } = result;
@@ -393,8 +401,10 @@ export async function coderPoolNode(
     stream.markdown(response);
 
     // Apply file writes
+    const domainFiles: string[] = [];
     try {
       const writeResult = await applyCodeToWorkspace(response, stream);
+      domainFiles.push(...writeResult.written);
       allWrittenFiles.push(...writeResult.written);
       if (writeResult.written.length > 0) {
         logger.info(
@@ -408,8 +418,9 @@ export async function coderPoolNode(
       stream.markdown(`\n> ⚠️ File write error in ${domain.domain}: ${errMsg}\n`);
       errors.push(`coder:${domain.id}: file write failed: ${errMsg}`);
     }
+    domainWrittenFiles.set(domain.id, domainFiles);
 
-    // Parse terminal commands (collect, run after all domains)
+    // Run terminal commands
     try {
       const cmdResult = await runCommandsFromOutput(response, stream);
       for (const executed of cmdResult.executed) {
@@ -438,28 +449,135 @@ export async function coderPoolNode(
     });
 
     domainArtifacts[`domain_code:${domain.id}`] = cappedResponse;
-
-    // Post to the agent message bus
     postAgentMessage(state, `coder:${domain.id}`, "*", "info", cappedResponse);
   }
 
-  // ── 5. Summary ──
+  // ── 5. Build validation + targeted error-feedback retry ──
+  // After ALL domain coders have written their files, validate the build.
+  // If there are errors, identify which domain caused each error and let
+  // that domain's coder fix it. This is much more effective than one
+  // monolithic fix because each coder only sees ITS OWN mistakes.
+  let buildResult: BuildResult | null = null;
+  const MAX_POOL_FIX_RETRIES = 2;
+  const wsRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+
+  if (wsRoot && allWrittenFiles.length > 0) {
+    for (let attempt = 0; attempt <= MAX_POOL_FIX_RETRIES; attempt++) {
+      if (token.isCancellationRequested) { break; }
+
+      buildResult = await runBuildValidation(wsRoot);
+
+      if (buildResult.success) {
+        stream.markdown(`\n> ✅ **Build validation passed** — all domain outputs compile cleanly.\n`);
+        break;
+      }
+
+      if (attempt >= MAX_POOL_FIX_RETRIES) {
+        stream.markdown(
+          `\n> ⚠️ **Build still failing** after ${MAX_POOL_FIX_RETRIES} fix round(s). ` +
+          `${buildResult.errorCount} error(s) remain. Passing to Integrator for resolution.\n`
+        );
+        break;
+      }
+
+      stream.markdown(
+        `\n> 🔧 **Build failed** (${buildResult.errorCount} error(s)) — ` +
+        `dispatching targeted fixes (round ${attempt + 1}/${MAX_POOL_FIX_RETRIES})…\n`
+      );
+
+      // ── Dispatch targeted fix calls per domain ──
+      const fixPromises: Promise<DomainCoderResult>[] = [];
+      for (const result of results) {
+        if (result.error || !buildResult) { continue; }
+        const domFiles = domainWrittenFiles.get(result.domain.id) ?? [];
+        if (domFiles.length === 0) { continue; }
+
+        const domainErrors = filterErrorsForFiles(buildResult, domFiles);
+        if (domainErrors.length === 0) { continue; } // This domain's code is fine
+
+        const errorReport = domainErrors.map(d =>
+          `- **${d.file}:${d.line}** [${d.code}] ${d.message}`
+        ).join("\n");
+
+        stream.markdown(
+          `> 🔧 **${result.domain.domain}**: ${domainErrors.length} error(s) — sending back for fix\n`
+        );
+
+        // Create a targeted fix prompt for this domain
+        const fixPrompt = buildDomainCoderPrompt(result.domain, domains) +
+          `\n\n## ❌ BUILD ERRORS IN YOUR FILES — FIX THESE NOW\n` +
+          `Your previous code produced these compilation errors:\n${errorReport}\n\n` +
+          `Rewrite ONLY the files that have errors. Include COMPLETE fixed file contents.\n` +
+          `Do NOT re-output files that are already correct.`;
+
+        // Re-run this domain's coder with error context
+        fixPromises.push(
+          (async (): Promise<DomainCoderResult> => {
+            const start = Date.now();
+            try {
+              const fixMessages = buildMessages({
+                systemPrompt: fixPrompt,
+                workspaceContext: state.workspaceContext,
+                chatHistory: "",
+                userQuestion: `Fix the ${domainErrors.length} build error(s) in your files: ${domFiles.join(", ")}`,
+                maxSystemChars: 14_000,
+                maxWorkspaceChars: 4_000,
+              });
+              const fixResponse = await callModel(model, fixMessages, null, token, `coder-fix:${result.domain.id}`);
+              return { domain: result.domain, response: fixResponse, durationMs: Date.now() - start };
+            } catch (err: any) {
+              return { domain: result.domain, response: "", durationMs: Date.now() - start, error: err?.message ?? String(err) };
+            }
+          })()
+        );
+      }
+
+      // Wait for all fix calls to complete
+      if (fixPromises.length === 0) {
+        // No domain-specific errors found — might be cross-domain issues
+        stream.markdown(`> ℹ️ Errors may be cross-domain — passing to Integrator.\n`);
+        break;
+      }
+
+      const fixSettled = await Promise.allSettled(fixPromises);
+      for (const s of fixSettled) {
+        const fixResult = s.status === "fulfilled" ? s.value : null;
+        if (!fixResult || fixResult.error || !fixResult.response) { continue; }
+
+        // Apply the fix
+        try {
+          const writeResult = await applyCodeToWorkspace(fixResult.response, stream);
+          if (writeResult.written.length > 0) {
+            allWrittenFiles.push(...writeResult.written);
+            const existing = domainWrittenFiles.get(fixResult.domain.id) ?? [];
+            existing.push(...writeResult.written);
+            domainWrittenFiles.set(fixResult.domain.id, existing);
+            logger.info(`coder-fix:${fixResult.domain.id}`, `Fix wrote ${writeResult.written.length} file(s)`);
+          }
+        } catch (err: any) {
+          logger.error(`coder-fix:${fixResult.domain.id}`, `Fix write failed: ${err?.message}`);
+        }
+      }
+    }
+  }
+
+  // ── 6. Summary ──
   const successCount = results.filter((r) => !r.error).length;
   const totalFiles = allWrittenFiles.length;
+  const buildStatus = buildResult
+    ? (buildResult.success ? "✅ build passed" : `⚠️ ${buildResult.errorCount} error(s)`)
+    : "⏭️ no build check";
 
   stream.markdown(
     `\n---\n\n` +
       `> ✅ **Engineering Team complete** ` +
-      `(${successCount}/${domains.length} coders · ${totalFiles} files · ${formatMs(parallelMs)} wall-clock)\n`
+      `(${successCount}/${domains.length} coders · ${totalFiles} files · ${formatMs(parallelMs)} wall-clock · ${buildStatus})\n`
   );
 
   if (allWrittenFiles.length > 0) {
     const byDomain = results
       .filter((r) => !r.error)
-      .map((r) => {
-        // Count files per domain by checking which written files match domain patterns
-        return `>   📦 ${r.domain.domain}`;
-      })
+      .map((r) => `>   📦 ${r.domain.domain}`)
       .join("\n");
     stream.markdown(`\n${byDomain}\n\n`);
   }
@@ -475,6 +593,8 @@ export async function coderPoolNode(
       ...(allWrittenFiles.length > 0
         ? { written_files: allWrittenFiles.join(", ") }
         : {}),
+      ...(buildResult ? { build_status: buildResult.success ? "passed" : `failed:${buildResult.errorCount}` } : {}),
+      ...(buildResult && !buildResult.success ? { build_errors: formatBuildErrorsForLLM(buildResult) } : {}),
     },
     domainAssignments: domains,
     terminalResults: allTerminalResults,

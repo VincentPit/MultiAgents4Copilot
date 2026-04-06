@@ -27,6 +27,7 @@ const workspace = {
   workspaceFolders: [{ uri: Uri.file("/mock-workspace"), name: "mock", index: 0 }],
   fs: {
     stat: jest.fn().mockRejectedValue(new Error("not found")),
+    readFile: jest.fn().mockRejectedValue(new Error("not found")),
     writeFile: jest.fn().mockResolvedValue(undefined),
     readDirectory: jest.fn().mockResolvedValue([]),
   },
