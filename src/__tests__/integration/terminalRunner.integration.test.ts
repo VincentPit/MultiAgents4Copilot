@@ -210,7 +210,7 @@ describe("runCommandsFromOutput — user consent", () => {
 
     expect(mockShowWarning).toHaveBeenCalledTimes(1);
     const [msg] = mockShowWarning.mock.calls[0];
-    expect(msg).toContain("terminal command");
+    expect(msg).toContain("command");
   }, 15_000);
 
   it("skips execution when user declines (Cancel)", async () => {

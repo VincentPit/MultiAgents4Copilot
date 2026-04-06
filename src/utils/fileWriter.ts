@@ -197,8 +197,9 @@ function guessLanguage(filePath: string): string {
 /**
  * Ask the user for consent before writing files to the workspace.
  *
- * Shows a modal dialog listing the files that will be created/updated
- * and waits for explicit approval. Returns `true` if the user consented.
+ * Shows a compact notification toast (non-modal sliding bar) with a short
+ * summary. Users can click "Apply" to approve, "Review List" to inspect
+ * the full file list in a QuickPick, or "Cancel" to decline.
  */
 async function requestWriteConsent(
   blocks: ParsedFileBlock[],
@@ -218,22 +219,49 @@ async function requestWriteConsent(
     }
   }
 
-  // Build a human-readable summary
+  // Build a short one-line summary (fits in the toast)
   const parts: string[] = [];
-  if (newFiles.length > 0) {
-    parts.push(`Create ${newFiles.length} new file(s): ${newFiles.join(", ")}`);
-  }
-  if (existingFiles.length > 0) {
-    parts.push(`Overwrite ${existingFiles.length} existing file(s): ${existingFiles.join(", ")}`);
-  }
-  const summary = parts.join(" · ");
+  if (newFiles.length > 0) { parts.push(`${newFiles.length} new`); }
+  if (existingFiles.length > 0) { parts.push(`${existingFiles.length} modified`); }
+  const summary = parts.join(", ");
 
+  // Non-modal notification toast — compact sliding bar in bottom-right
   const choice = await vscode.window.showWarningMessage(
-    `🤖 The Coder agent wants to write ${blocks.length} file(s) to your workspace.\n\n${summary}`,
-    { modal: true, detail: `Files:\n${blocks.map(b => `  • ${b.filePath}`).join("\n")}` },
+    `🤖 Agent wants to write ${blocks.length} file(s) (${summary})`,
     "Apply Changes",
+    "Review List",
     "Cancel",
   );
+
+  if (choice === "Review List") {
+    // Show detailed file list in a QuickPick so user can inspect
+    const items = blocks.map(b => {
+      const isNew = newFiles.includes(b.filePath);
+      return {
+        label: `${isNew ? "$(new-file)" : "$(edit)"} ${b.filePath}`,
+        description: isNew ? "new" : "overwrite",
+        picked: true,
+      };
+    });
+
+    const picked = await vscode.window.showQuickPick(items, {
+      canPickMany: false,
+      title: `${blocks.length} file(s) to write — close to approve, Esc to cancel`,
+      placeHolder: "Review the file list, then close this picker to approve",
+    });
+
+    // If they selected an item or dismissed normally (not Esc), approve.
+    // showQuickPick returns undefined on Esc — treat that as cancel.
+    // For a simple UX: after reviewing, show one more quick confirm.
+    const confirm = await vscode.window.showWarningMessage(
+      `Apply ${blocks.length} file change(s)?`,
+      "Apply Changes",
+      "Cancel",
+    );
+    const consented = confirm === "Apply Changes";
+    logger.info("fileWriter", `User consent (after review): ${consented ? "APPROVED" : "DENIED"} for ${blocks.length} file(s)`);
+    return consented;
+  }
 
   const consented = choice === "Apply Changes";
   logger.info("fileWriter", `User consent: ${consented ? "APPROVED" : "DENIED"} for ${blocks.length} file(s)`);

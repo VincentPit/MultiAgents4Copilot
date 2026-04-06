@@ -184,7 +184,7 @@ function isBlocked(command: string): boolean {
 
 /**
  * Ask the user whether they want to run the given commands.
- * Shows each command in a modal dialog.
+ * Shows a compact notification toast (non-modal sliding bar).
  */
 async function requestCommandConsent(
   commands: ParsedCommand[],
@@ -196,11 +196,13 @@ async function requestCommandConsent(
     return { approved, declined };
   }
 
-  // Show all commands at once for efficiency
-  const commandList = commands.map((c, i) => `  ${i + 1}. ${c.command}`).join("\n");
+  // Non-modal notification toast — compact sliding bar
+  const preview = commands.length <= 2
+    ? commands.map(c => c.command).join("; ")
+    : `${commands[0].command} + ${commands.length - 1} more`;
+
   const choice = await vscode.window.showWarningMessage(
-    `🤖 The agent wants to run ${commands.length} terminal command(s):\n\n${commandList}`,
-    { modal: true, detail: `Commands will run in the workspace root directory.\n\n${commandList}` },
+    `🤖 Agent wants to run ${commands.length} command(s): ${preview}`,
     "Run All",
     "Review One-by-One",
     "Cancel",
@@ -212,8 +214,7 @@ async function requestCommandConsent(
   } else if (choice === "Review One-by-One") {
     for (const cmd of commands) {
       const result = await vscode.window.showWarningMessage(
-        `Run this command?\n\n  $ ${cmd.command}`,
-        { modal: true },
+        `Run: $ ${cmd.command}`,
         "Run",
         "Skip",
       );

@@ -44,6 +44,7 @@ const window = {
   showInformationMessage: jest.fn().mockResolvedValue(undefined),
   showErrorMessage: jest.fn().mockResolvedValue(undefined),
   showTextDocument: jest.fn().mockResolvedValue(undefined),
+  showQuickPick: jest.fn().mockResolvedValue(undefined),
   createTerminal: jest.fn().mockReturnValue({
     show: jest.fn(),
     sendText: jest.fn(),
