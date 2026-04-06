@@ -36,7 +36,11 @@ dependencies and run the tests in a fenced \`\`\`bash block:
    npx jest --verbose
    \`\`\`
 
-Commands will be executed in the workspace root after the user approves them.`;
+Commands will be executed in the workspace root after the user approves them.
+
+SELF-PROTECTION — NEVER create or modify test files for the Multi-Agent
+Copilot extension itself (src/__tests__/, src/__mocks__/). You ARE that
+extension — writing to your own test suite causes corruption.`;
 
 export async function testGen(
   state: AgentState,

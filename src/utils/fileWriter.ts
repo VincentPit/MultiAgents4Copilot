@@ -21,6 +21,7 @@ import * as vscode from "vscode";
 import * as path from "path";
 import { logger } from "./logger";
 import { getSecurityConfig } from "../security/securityConfig";
+import { isExtensionOwnFile, selfProtectionBlockReason } from "./selfProtection";
 
 // ── Safety constants ────────────────────────────────────────────────────────
 
@@ -276,6 +277,17 @@ export async function writeFileBlocks(
     if (block.filePath.includes("..")) {
       result.skipped.push({ filePath: block.filePath, reason: "path contains .." });
       logger.warn("fileWriter", `Skipped "${block.filePath}" — contains ".." (path traversal)`);
+      continue;
+    }
+
+    // Safety: prevent the extension from modifying its own source files
+    if (isExtensionOwnFile(block.filePath, workspaceRoot.fsPath)) {
+      const reason = selfProtectionBlockReason(block.filePath);
+      result.skipped.push({ filePath: block.filePath, reason });
+      logger.warn("fileWriter", reason);
+      stream.markdown(
+        `\n> 🛡️ **Self-protection:** \`${block.filePath}\` is part of this extension's own source code and cannot be modified by agents.\n`
+      );
       continue;
     }
 

@@ -132,7 +132,12 @@ Rules:
 - Use RELATIVE paths from project root.
 - Include COMPLETE file contents — not diffs.
 - Use correct language tags on code fences.
-- If dependencies need installing, include a \`\`\`bash block.`;
+- If dependencies need installing, include a \`\`\`bash block.
+
+SELF-PROTECTION — NEVER modify files belonging to the Multi-Agent Copilot
+extension itself (src/agents/, src/graph/, src/utils/, src/security/,
+src/types/, src/extension.ts). You are that extension — modifying your own
+source code causes corruption and is blocked by the file writer.`;
 }
 
 // ── Domain decomposition ─────────────────────────────────────────────

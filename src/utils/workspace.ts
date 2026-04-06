@@ -6,6 +6,7 @@
 
 import * as vscode from "vscode";
 import { logger } from "./logger";
+import { isExtensionOwnFile, isWorkspaceTheExtension, filterSelfFromFileTree } from "./selfProtection";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -96,7 +97,25 @@ export async function getWorkspaceSnapshot(): Promise<WorkspaceSnapshot> {
   }
 
   logger.info("workspace", `Snapshot: ${roots.length} roots, ${openFiles.length} open files, active=${activeFile?.path ?? "none"}`);
-  return { roots, activeFile, openFiles, fileTree, projectMeta };
+
+  // ── Self-protection: filter out the extension's own source files ──
+  // If the user has the extension's own workspace open, agents must not
+  // see the extension's source to avoid self-modification corruption.
+  const wsRoot = roots[0] ?? "";
+  const filteredActiveFile = activeFile && isExtensionOwnFile(activeFile.path, wsRoot)
+    ? null
+    : activeFile;
+  const filteredOpenFiles = openFiles.filter(f => !isExtensionOwnFile(f.path, wsRoot));
+  const filteredFileTree = filterSelfFromFileTree(fileTree, wsRoot);
+  const filteredProjectMeta = isWorkspaceTheExtension(wsRoot)
+    ? projectMeta.filter(m => !["package.json", "tsconfig.json", "jest.config.js"].includes(m.path))
+    : projectMeta;
+
+  if (filteredActiveFile !== activeFile || filteredOpenFiles.length !== openFiles.length) {
+    logger.info("workspace", "Self-protection: filtered extension's own files from workspace snapshot");
+  }
+
+  return { roots, activeFile: filteredActiveFile, openFiles: filteredOpenFiles, fileTree: filteredFileTree, projectMeta: filteredProjectMeta };
 }
 
 // ── File tree builder ────────────────────────────────────────────────

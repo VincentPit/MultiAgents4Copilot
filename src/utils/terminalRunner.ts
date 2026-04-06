@@ -23,6 +23,7 @@ import * as vscode from "vscode";
 import * as cp from "child_process";
 import { logger } from "./logger";
 import { getSecurityConfig } from "../security/securityConfig";
+import { isWorkspaceTheExtension } from "./selfProtection";
 
 /** Maximum allowed command argument length. */
 const MAX_COMMAND_LENGTH = getSecurityConfig().terminalRunner.maxArgLength;
@@ -139,6 +140,23 @@ const BLOCKED_PATTERNS: RegExp[] = [
   /\bsudo\s+chmod\s+777/,                           // sudo chmod 777
 ];
 
+/**
+ * Patterns that target the extension's own source files.
+ * These are checked separately only when the workspace IS the extension.
+ */
+const SELF_MODIFICATION_PATTERNS: RegExp[] = [
+  // Direct writes to extension source directories
+  /\b(?:sed|awk|perl)\b.*\bsrc\/(agents|graph|utils|security|types)\//,
+  // Overwrite extension source with redirects
+  />\s*src\/(agents|graph|utils|security|types|extension\.ts)/,
+  // mv/cp that targets extension source
+  /\b(?:mv|cp)\b.*\bsrc\/(agents|graph|utils|security|types)\//,
+  // tee or dd targeting extension source
+  /\b(?:tee|dd)\b.*\bsrc\//,
+  // npm/node scripts that directly modify source files
+  /\bnode\b.*-e\b.*(?:writeFile|appendFile).*\bsrc\//,
+];
+
 /** Check if a command is blocked for safety. */
 function isBlocked(command: string): boolean {
   // Length check first
@@ -146,7 +164,20 @@ function isBlocked(command: string): boolean {
     logger.warn("terminalRunner", `Command too long (${command.length} chars > ${MAX_COMMAND_LENGTH})`);
     return true;
   }
-  return BLOCKED_PATTERNS.some((pattern) => pattern.test(command));
+  // Always-blocked dangerous patterns
+  if (BLOCKED_PATTERNS.some((pattern) => pattern.test(command))) {
+    return true;
+  }
+  // Self-modification guard: if the workspace IS the extension, block
+  // commands that target extension source files
+  const wsRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "";
+  if (isWorkspaceTheExtension(wsRoot)) {
+    if (SELF_MODIFICATION_PATTERNS.some((pattern) => pattern.test(command))) {
+      logger.warn("terminalRunner", `Blocked self-modification command: ${command.slice(0, 80)}…`);
+      return true;
+    }
+  }
+  return false;
 }
 
 // ── User consent ─────────────────────────────────────────────────────

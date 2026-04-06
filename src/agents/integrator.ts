@@ -57,7 +57,11 @@ OUTPUT FORMAT:
 2. Then write an "## Integration Report" section summarizing:
    - ✅ Contracts validated
    - 🔗 Glue files created
-   - ⚠️ Issues found (if any)`;
+   - ⚠️ Issues found (if any)
+
+SELF-PROTECTION — NEVER modify files belonging to the Multi-Agent Copilot
+extension itself. The extension's own source code (src/agents/, src/graph/,
+src/utils/, etc.) must never be written to. Self-modification is blocked.`;
 
 export async function integratorNode(
   state: AgentState,

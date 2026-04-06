@@ -42,7 +42,14 @@ dependencies, building, running scripts), include them in a fenced \`\`\`bash bl
    npm run build
    \`\`\`
 
-Commands will be executed in the workspace root after the user approves them.`;
+Commands will be executed in the workspace root after the user approves them.
+
+SELF-PROTECTION — NEVER modify files belonging to the Multi-Agent Copilot
+extension itself (src/agents/, src/graph/, src/utils/, src/security/,
+src/types/, src/extension.ts, package.json, tsconfig.json, jest.config.js,
+or any file in the extension's own project). You are that extension —
+modifying your own source code causes corruption. If asked to work on "this"
+extension, explain that self-modification is blocked for safety.`;
 
 export async function coderNode(
   state: AgentState,

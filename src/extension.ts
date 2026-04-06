@@ -26,6 +26,7 @@ import { testGen } from "./agents/tester";
 import { logger } from "./utils/logger";
 import { getWorkspaceSnapshot, formatSnapshotForLLM } from "./utils/workspace";
 import { runIntegrityCheck, type IntegrityReport } from "./utils/integrity";
+import { registerExtensionRoot } from "./utils/selfProtection";
 
 const PARTICIPANT_ID = "multi-agent-copilot.team";
 
@@ -54,6 +55,10 @@ export function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(agent);
   logger.info("extension", "Multi-Agent Copilot activated (v0.7.0)");
+
+  // Register the extension's own root so the self-protection guard
+  // can prevent agents from modifying the extension's own source files.
+  registerExtensionRoot(context.extensionUri.fsPath);
 
   // Run module integrity check asynchronously at activation.
   // The promise is awaited in the chat handler to ensure the check
