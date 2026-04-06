@@ -36,6 +36,8 @@ import {
   type QualityGateResult,
   type BuildDiagnostic,
 } from "../utils/qualityGate";
+import { AgentOutputManager } from "../utils/agentOutputManager";
+import { showBatchDiffs } from "../utils/diffViewer";
 
 // ── Prompts ──────────────────────────────────────────────────────────
 
@@ -353,8 +355,14 @@ export async function coderPoolNode(
       `\n\n`
   );
 
+  // ── Set up output channels for parallel domain coders ──
+  const outputMgr = AgentOutputManager.getInstance();
   if (domains.length > 1) {
     stream.markdown(`> 🔀 Running **${domains.length} domain coders in parallel**…\n\n`);
+    stream.markdown(`> 📺 _Detailed output streaming to per-domain output channels_\n\n`);
+    // Reveal output channels for all domains
+    const domainChannelNames = domains.map(d => `coder`);
+    outputMgr.revealParallel(domainChannelNames);
   }
 
   // ── 3. Run all domain coders in parallel ──
@@ -402,11 +410,13 @@ export async function coderPoolNode(
       continue;
     }
 
-    // Show the domain coder's output
+    // Stream status to chat; detailed output goes to output channel
     stream.markdown(
       `\n##### ${coderLabel} _(${formatMs(durationMs)})_\n\n`
     );
-    stream.markdown(response);
+    // Send full LLM output to the output channel (not chat)
+    outputMgr.append("coder", `\n═══ Domain: ${domain.domain} (${formatMs(durationMs)}) ═══\n`);
+    outputMgr.append("coder", response);
 
     // Apply file writes
     const domainFiles: string[] = [];
@@ -415,6 +425,9 @@ export async function coderPoolNode(
       domainFiles.push(...writeResult.written);
       allWrittenFiles.push(...writeResult.written);
       if (writeResult.written.length > 0) {
+        // Show inline diffs for modified files
+        await showBatchDiffs(writeResult.written, writeResult.oldContents);
+        stream.markdown(`> ✅ **${domain.domain}**: ${writeResult.written.length} file(s) written — diffs shown in editor\n`);
         logger.info(
           `coder:${domain.id}`,
           `Wrote ${writeResult.written.length} file(s): ${writeResult.written.join(", ")}`
@@ -570,6 +583,7 @@ export async function coderPoolNode(
             const existing = domainWrittenFiles.get(fixResult.domain.id) ?? [];
             existing.push(...writeResult.written);
             domainWrittenFiles.set(fixResult.domain.id, existing);
+            await showBatchDiffs(writeResult.written, writeResult.oldContents);
             logger.info(`coder-fix:${fixResult.domain.id}`, `Fix wrote ${writeResult.written.length} file(s)`);
           }
         } catch (err: any) {

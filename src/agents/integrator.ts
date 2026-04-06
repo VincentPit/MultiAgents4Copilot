@@ -30,6 +30,8 @@ import {
   formatQualityReportForLLM,
   type QualityGateResult,
 } from "../utils/qualityGate";
+import { AgentOutputManager } from "../utils/agentOutputManager";
+import { showBatchDiffs } from "../utils/diffViewer";
 import type { TerminalResult } from "../graph/state";
 
 const SYSTEM_PROMPT = `You are the Integration Engineer — a Staff-level tech lead who merges
@@ -87,6 +89,13 @@ export async function integratorNode(
     `#### 🔗 Integration Engineer — Merging domain outputs\n\n`
   );
 
+  // ── Set up output channel for detailed LLM output ──
+  const outputMgr = AgentOutputManager.getInstance();
+  const taskSummary = `Integrating ${state.domainAssignments.length} domain outputs`;
+  outputMgr.startRun("integrator", taskSummary);
+  outputMgr.reveal("integrator");
+  stream.markdown(`> 📺 _Detailed output streaming to **Integration Engineer** output channel_\n\n`);
+
   const domains = state.domainAssignments;
 
   // Build a summary of what each domain produced
@@ -142,15 +151,21 @@ export async function integratorNode(
     maxReferencesChars: 4_000,
   });
 
-  const response = await callModel(model, messages, stream, token, "integrator");
+  // Stream LLM output to the output channel, NOT the chat panel
+  const outputSink = { append: (text: string) => outputMgr.append("integrator", text) };
+  const response = await callModel(model, messages, null, token, "integrator", outputSink);
 
   // ── Apply integration files ──
   let writtenFiles: string[] = [];
+  let allOldContents: Map<string, string> = new Map();
   let lastResponse = response;
   try {
     const result = await applyCodeToWorkspace(response, stream);
     writtenFiles = result.written;
+    allOldContents = result.oldContents;
     if (writtenFiles.length > 0) {
+      await showBatchDiffs(writtenFiles, allOldContents);
+      stream.markdown(`> ✅ **${writtenFiles.length} integration file(s)** written — diffs shown in editor\n`);
       logger.info(
         "integrator",
         `Wrote ${writtenFiles.length} integration file(s): ${writtenFiles.join(", ")}`
@@ -208,13 +223,16 @@ export async function integratorNode(
         maxWorkspaceChars: 6_000,
       });
 
-      const fixResponse = await callModel(model, fixMessages, stream, token, `integrator-fix-${attempt + 1}`);
+      outputMgr.append("integrator", `\n--- CI fix attempt ${attempt + 1} ---\n`);
+      const fixResponse = await callModel(model, fixMessages, null, token, `integrator-fix-${attempt + 1}`, outputSink);
       lastResponse = fixResponse;
 
       try {
         const fixResult = await applyCodeToWorkspace(fixResponse, stream);
         if (fixResult.written.length > 0) {
           writtenFiles.push(...fixResult.written);
+          for (const [k, v] of fixResult.oldContents) { allOldContents.set(k, v); }
+          await showBatchDiffs(fixResult.written, fixResult.oldContents);
           logger.info("integrator", `Fix attempt ${attempt + 1}: wrote ${fixResult.written.length} file(s)`);
         }
       } catch (err: any) {
@@ -243,6 +261,9 @@ export async function integratorNode(
   const finalCapped = lastResponse.length > 6_000
     ? lastResponse.slice(0, 6_000) + "\n[… truncated in state]"
     : lastResponse;
+
+  // ── End the output channel run ──
+  outputMgr.endRun("integrator", Date.now(), writtenFiles.length > 0);
 
   const newMessage: AgentMessage = {
     role: "assistant",

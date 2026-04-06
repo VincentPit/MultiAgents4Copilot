@@ -171,15 +171,27 @@ export async function countTokens(
 }
 
 /**
+ * Optional alternative sink for streaming tokens somewhere other than
+ * the chat panel (e.g. an agent output channel). When provided, tokens
+ * are sent here instead of to stream.markdown().
+ */
+export interface OutputSink {
+  append(text: string): void;
+}
+
+/**
  * Call a model with automatic retry and fallback.
- * Streams tokens to the chat panel in real-time.
+ * Streams tokens to the chat panel in real-time, unless `outputSink`
+ * is provided — in which case tokens stream to that sink instead
+ * (used to redirect LLM output to per-agent output channels).
  */
 export async function callModel(
   model: vscode.LanguageModelChat,
   messages: vscode.LanguageModelChatMessage[],
   stream: vscode.ChatResponseStream | null,
   token: vscode.CancellationToken,
-  agentName: string = "unknown"
+  agentName: string = "unknown",
+  outputSink?: OutputSink
 ): Promise<string> {
   let lastError: unknown;
 
@@ -197,7 +209,10 @@ export async function callModel(
       for await (const chunk of response.text) {
         chunks.push(chunk);
         outputChars += chunk.length;
-        if (stream) {
+        if (outputSink) {
+          // Stream to the agent's output channel (not the chat panel)
+          outputSink.append(chunk);
+        } else if (stream) {
           stream.markdown(chunk);
         }
         // Safety: stop accumulating if output is absurdly large
@@ -286,7 +301,11 @@ export async function callModel(
         const chunks: string[] = [];
         for await (const chunk of response.text) {
           chunks.push(chunk);
-          if (stream) { stream.markdown(chunk); }
+          if (outputSink) {
+            outputSink.append(chunk);
+          } else if (stream) {
+            stream.markdown(chunk);
+          }
         }
         return chunks.join("");
       } catch {

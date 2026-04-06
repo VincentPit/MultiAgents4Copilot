@@ -8,6 +8,8 @@ import { callModel, selectModel, MODELS, buildMessages, capContext } from "./bas
 import { logger } from "../utils/logger";
 import { applyCodeToWorkspace } from "../utils/fileWriter";
 import { runCommandsFromOutput, type CommandResult } from "../utils/terminalRunner";
+import { AgentOutputManager } from "../utils/agentOutputManager";
+import { showBatchDiffs } from "../utils/diffViewer";
 import type { TerminalResult } from "../graph/state";
 
 const SYSTEM_PROMPT = `You are a senior test engineer for automated testing.
@@ -49,6 +51,13 @@ export async function testGen(
   token: vscode.CancellationToken,
 ): Promise<Partial<AgentState>> {
   stream.markdown(`\n\n---\n#### \u{1F9EA} Test Generator \u{2014} Writing tests\n\n`);
+
+  // ── Set up output channel for detailed LLM output ──
+  const outputMgr = AgentOutputManager.getInstance();
+  const taskSummary = [...state.messages].reverse().find(m => m.role === "user")?.content ?? "test generation";
+  outputMgr.startRun("test_gen", taskSummary);
+  outputMgr.reveal("test_gen");
+  stream.markdown(`> 📺 _Detailed output streaming to **Test Generator** output channel_\n\n`);
 
   // Prefer Claude Opus for test generation
   const testResult = await selectModel(MODELS.claudeOpus);
@@ -97,15 +106,17 @@ export async function testGen(
     maxReferencesChars: 10_000,
   });
 
-  const response = await callModel(activeModel, messages, stream, token, "test_gen");
+  // Stream LLM output to the output channel, NOT the chat panel
+  const outputSink = { append: (text: string) => outputMgr.append("test_gen", text) };
+  const response = await callModel(activeModel, messages, null, token, "test_gen", outputSink);
 
   // ── Write test files to the workspace ──────────────────────────────
   let writtenFiles: string[] = [];
   try {
     const writeResult = await applyCodeToWorkspace(response, stream);
     writtenFiles = writeResult.written;
-    if (writtenFiles.length > 0) {
-      logger.info("test_gen", `Wrote ${writtenFiles.length} test file(s): ${writtenFiles.join(", ")}`);
+    if (writtenFiles.length > 0) {      await showBatchDiffs(writtenFiles, writeResult.oldContents);
+      stream.markdown(`> ✅ **${writtenFiles.length} test file(s)** written — diffs shown in editor\n`);      logger.info("test_gen", `Wrote ${writtenFiles.length} test file(s): ${writtenFiles.join(", ")}`);
     }
   } catch (err: any) {
     logger.error("test_gen", `Failed to write test files: ${err.message}`);
@@ -138,6 +149,9 @@ export async function testGen(
   const cappedResponse = response.length > 6000
     ? response.slice(0, 6000) + "\n[... tests truncated in state]"
     : response;
+
+  // ── End the output channel run ──
+  outputMgr.endRun("test_gen", Date.now(), writtenFiles.length > 0);
 
   const newMessage: AgentMessage = {
     role: "assistant",

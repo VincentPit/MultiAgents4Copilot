@@ -6,7 +6,6 @@
  *   @team build a REST API for a todo app
  *   @team /plan migrate our auth to OAuth2
  *   @team /code fibonacci function in Rust
- *   @team /research how does React Server Components work
  *   @team /review <paste code>
  */
 
@@ -18,7 +17,6 @@ import { supervisorNode } from "./agents/supervisor";
 import { plannerNode } from "./agents/planner";
 import { coderNode } from "./agents/coder";
 import { coderPoolNode } from "./agents/coderPool";
-import { researcherNode } from "./agents/researcher";
 import { reviewerNode } from "./agents/reviewer";
 import { integratorNode } from "./agents/integrator";
 import { uiDesigner } from "./agents/ui_designer";
@@ -27,6 +25,8 @@ import { logger } from "./utils/logger";
 import { getWorkspaceSnapshot, formatSnapshotForLLM } from "./utils/workspace";
 import { runIntegrityCheck, type IntegrityReport } from "./utils/integrity";
 import { registerExtensionRoot } from "./utils/selfProtection";
+import { registerDiffProvider, clearDiffStore } from "./utils/diffViewer";
+import { AgentOutputManager } from "./utils/agentOutputManager";
 
 const PARTICIPANT_ID = "multi-agent-copilot.team";
 
@@ -55,6 +55,10 @@ export function activate(context: vscode.ExtensionContext) {
 
   context.subscriptions.push(agent);
   logger.info("extension", "Multi-Agent Copilot activated (v0.7.0)");
+
+  // Register the in-memory diff content provider so agents can show
+  // before/after diffs in the editor instead of streaming code in chat.
+  registerDiffProvider(context);
 
   // Register the extension's own root so the self-protection guard
   // can prevent agents from modifying the extension's own source files.
@@ -86,7 +90,6 @@ const AGENT_NODES: Record<string, AgentNode> = {
   planner: plannerNode,
   coder: coderNode,
   coder_pool: coderPoolNode,
-  researcher: researcherNode,
   reviewer: reviewerNode,
   integrator: integratorNode,
   ui_designer: uiDesigner,
@@ -175,7 +178,6 @@ async function handleDirectCommand(
     plan: "planner",
     code: "coder",
     build: "coder_pool",
-    research: "researcher",
     review: "reviewer",
     design: "ui_designer",
     test: "test_gen",
@@ -240,7 +242,6 @@ async function runGraph(
     `| 💻 Coder | Writes & edits code (single domain) |\n` +
     `| 🏢 Engineering Team | Spawns parallel domain coders for large projects |\n` +
     `| 🔗 Integration Engineer | Merges parallel outputs into cohesive code |\n` +
-    `| 🔍 Researcher | Explains concepts & finds information |\n` +
     `| 🎨 UI Designer | Designs interfaces & components (Gemini 3 Pro) |\n` +
     `| 🧪 Test Generator | Creates comprehensive test suites |\n` +
     `| ✅ Reviewer | Reviews code for quality & correctness |\n\n` +
@@ -422,6 +423,8 @@ function formatDuration(ms: number): string {
 }
 
 export function deactivate() {
+  AgentOutputManager.getInstance().dispose();
+  clearDiffStore();
   logger.dispose();
 }
 

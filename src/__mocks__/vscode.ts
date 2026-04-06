@@ -34,6 +34,7 @@ const workspace = {
   findFiles: jest.fn().mockResolvedValue([]),
   openTextDocument: jest.fn().mockResolvedValue({ getText: () => "" }),
   asRelativePath: (uri: any) => (typeof uri === "string" ? uri : uri.fsPath ?? uri.path),
+  registerTextDocumentContentProvider: jest.fn().mockReturnValue({ dispose: jest.fn() }),
 };
 
 // ── Window ───────────────────────────────────────────────────────────
@@ -41,6 +42,8 @@ const workspace = {
 const window = {
   showWarningMessage: jest.fn().mockResolvedValue("Apply Changes"),
   showInformationMessage: jest.fn().mockResolvedValue(undefined),
+  showErrorMessage: jest.fn().mockResolvedValue(undefined),
+  showTextDocument: jest.fn().mockResolvedValue(undefined),
   createTerminal: jest.fn().mockReturnValue({
     show: jest.fn(),
     sendText: jest.fn(),
@@ -54,6 +57,7 @@ const window = {
     show: jest.fn(),
     dispose: jest.fn(),
     appendLine: jest.fn(),
+    clear: jest.fn(),
   }),
   activeTextEditor: undefined,
   tabGroups: { all: [] },
@@ -139,6 +143,14 @@ const FileType = {
   SymbolicLink: 64,
 };
 
+const ViewColumn = {
+  Active: -1,
+  Beside: -2,
+  One: 1,
+  Two: 2,
+  Three: 3,
+};
+
 class ThemeIcon {
   id: string;
   constructor(id: string) { this.id = id; }
@@ -193,6 +205,7 @@ module.exports = {
   commands,
   extensions,
   FileType,
+  ViewColumn,
   ThemeIcon,
   LanguageModelChatMessage,
   LanguageModelError,

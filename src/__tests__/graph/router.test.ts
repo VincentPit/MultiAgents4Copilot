@@ -23,7 +23,7 @@ describe("routeSupervisor", () => {
     expect(result.done).toBe(false);
   });
 
-  it.each(["coder", "researcher", "reviewer", "ui_designer", "test_gen"])(
+  it.each(["coder", "reviewer", "ui_designer", "test_gen"])(
     "routes to %s when nextAgent is set",
     (agent) => {
       state.nextAgent = agent;
@@ -74,9 +74,9 @@ describe("routeSupervisor", () => {
   // ── Multi-agent / parallel dispatch ──
 
   it("parses comma-separated agents for parallel fan-out", () => {
-    state.nextAgent = "researcher,coder";
+    state.nextAgent = "coder,test_gen";
     const result = routeSupervisor(state);
-    expect(result.agents).toEqual(["researcher", "coder"]);
+    expect(result.agents).toEqual(["coder", "test_gen"]);
     expect(result.parallel).toBe(true);
     expect(result.done).toBe(false);
   });
@@ -89,9 +89,9 @@ describe("routeSupervisor", () => {
   });
 
   it("filters out invalid agents from comma-separated list", () => {
-    state.nextAgent = "coder,invalid,researcher";
+    state.nextAgent = "coder,invalid,test_gen";
     const result = routeSupervisor(state);
-    expect(result.agents).toEqual(["coder", "researcher"]);
+    expect(result.agents).toEqual(["coder", "test_gen"]);
     expect(result.parallel).toBe(true);
   });
 
@@ -102,18 +102,18 @@ describe("routeSupervisor", () => {
   });
 
   it("uses pendingAgents for fan-out when present", () => {
-    state.pendingAgents = ["researcher", "coder"];
+    state.pendingAgents = ["coder", "test_gen"];
     state.nextAgent = "";
     const result = routeSupervisor(state);
-    expect(result.agents).toEqual(["researcher", "coder"]);
+    expect(result.agents).toEqual(["coder", "test_gen"]);
     expect(result.parallel).toBe(true);
   });
 
   it("prefers pendingAgents over nextAgent when both are set", () => {
-    state.pendingAgents = ["researcher", "ui_designer"];
-    state.nextAgent = "coder";
+    state.pendingAgents = ["coder", "ui_designer"];
+    state.nextAgent = "test_gen";
     const result = routeSupervisor(state);
-    expect(result.agents).toEqual(["researcher", "ui_designer"]);
+    expect(result.agents).toEqual(["coder", "ui_designer"]);
     expect(result.parallel).toBe(true);
   });
 });
@@ -175,11 +175,11 @@ describe("routeFromPlan", () => {
   });
 
   it("parses a single agent from a plan step", () => {
-    state.plan = ["1. (researcher) Research best practices"];
+    state.plan = ["1. (coder) Write the implementation"];
     state.planStep = 0;
     const result = routeFromPlan(state);
     expect(result).not.toBeNull();
-    expect(result!.agents).toEqual(["researcher"]);
+    expect(result!.agents).toEqual(["coder"]);
     expect(result!.parallel).toBe(false);
   });
 
@@ -200,16 +200,16 @@ describe("routeFromPlan", () => {
 
   it("advances through plan steps correctly", () => {
     state.plan = [
-      "1. (researcher) Research",
-      "2. (coder) Implement",
+      "1. (coder) Implement",
+      "2. (test_gen) Test",
       "3. (reviewer) Review",
     ];
 
     state.planStep = 0;
-    expect(routeFromPlan(state)!.agents).toEqual(["researcher"]);
+    expect(routeFromPlan(state)!.agents).toEqual(["coder"]);
 
     state.planStep = 1;
-    expect(routeFromPlan(state)!.agents).toEqual(["coder"]);
+    expect(routeFromPlan(state)!.agents).toEqual(["test_gen"]);
 
     state.planStep = 2;
     expect(routeFromPlan(state)!.agents).toEqual(["reviewer"]);

@@ -33,7 +33,7 @@ jest.mock("../../agents/base.js", () => {
   };
 });
 
-// Mock github utils to prevent real HTTP calls from researcher
+// Mock github utils (no longer needed for researcher, kept for future use)
 jest.mock("../../utils/github.js", () => ({
   searchGitHubRepos: jest.fn().mockResolvedValue({ totalCount: 0, repos: [], query: "", rateRemaining: null }),
   formatRepoResults: jest.fn().mockReturnValue(""),
@@ -59,7 +59,6 @@ jest.mock("../../utils/terminalRunner.js", () => ({
 
 import { supervisorNode } from "../../agents/supervisor.js";
 import { plannerNode } from "../../agents/planner.js";
-import { researcherNode } from "../../agents/researcher.js";
 
 // ── Shared helpers ───────────────────────────────────────────────────
 
@@ -130,23 +129,6 @@ describe("chatHistory propagation to buildMessages", () => {
     const callArgs = mockBuildMessages.mock.calls[0][0];
     expect(callArgs.chatHistory).toBe(state.chatHistory);
     expect(callArgs.chatHistory).toContain("build a TODO app");
-  });
-
-  it("researcher passes chatHistory to the analysis buildMessages call", async () => {
-    mockCallModel.mockResolvedValue("research findings");
-    const state = stateWithChatHistory();
-
-    await researcherNode(state, mockModel, mockStream(), mockToken());
-
-    // Researcher calls buildMessages twice: once for keyword extraction (no chatHistory needed),
-    // once for the main analysis (should have chatHistory)
-    const callsWithHistory = mockBuildMessages.mock.calls.filter(
-      (call: any[]) => call[0]?.chatHistory
-    );
-    expect(callsWithHistory.length).toBeGreaterThanOrEqual(1);
-    expect(callsWithHistory.some((call: any[]) =>
-      call[0].chatHistory.includes("build a TODO app")
-    )).toBe(true);
   });
 
   it("does NOT include chatHistory section when chatHistory is empty", async () => {

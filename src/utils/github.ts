@@ -174,7 +174,7 @@ export function formatRepoResults(result: GitHubSearchResult): string {
 
 /**
  * Build a concise context string for the LLM summarising the repos found.
- * This gets injected into the researcher's system prompt so the model can
+ * This gets injected into the LLM's system prompt so the model can
  * reference real projects in its analysis.
  */
 export function repoContextForLLM(result: GitHubSearchResult): string {

@@ -3,7 +3,7 @@
  *
  * Supports three routing modes:
  *   1. Single dispatch   — supervisor says "coder" → one agent runs
- *   2. Parallel fan-out  — supervisor says "researcher,coder" → both run concurrently
+ *   2. Parallel fan-out  — supervisor says "coder,test_gen" → both run concurrently
  *   3. Plan-driven       — planner's steps drive which agents run and in what order
  */
 
@@ -18,7 +18,7 @@ export interface RouteResult {
 }
 
 const VALID_AGENTS = new Set([
-  "planner", "coder", "coder_pool", "researcher", "reviewer",
+  "planner", "coder", "coder_pool", "reviewer",
   "ui_designer", "test_gen", "integrator",
 ]);
 
@@ -27,7 +27,7 @@ const VALID_AGENTS = new Set([
  *
  * The supervisor's `nextAgent` field can be:
  *   - A single agent name: "coder"
- *   - Comma-separated for parallel: "researcher,coder"
+ *   - Comma-separated for parallel: "coder,test_gen"
  *   - "finish" to end the graph
  *
  * Also checks `pendingAgents` for queued parallel work.
@@ -86,7 +86,7 @@ export function routeReviewer(state: AgentState): RouteResult {
  *
  * Looks for patterns like:
  *   "1. (coder) Write the API routes"
- *   "2. (researcher) Look up OAuth2 best practices"
+ *   "2. (test_gen) Write comprehensive tests"
  *   "3. (coder, test_gen) Implement and test the auth module"
  *
  * Returns the agents assigned to the current plan step.

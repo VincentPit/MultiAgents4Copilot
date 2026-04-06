@@ -76,12 +76,12 @@ describe("supervisorNode routing decisions", () => {
   });
 
   it("routes to comma-separated agents for parallel dispatch", async () => {
-    mockCallModel.mockResolvedValue("researcher,coder");
+    mockCallModel.mockResolvedValue("coder,test_gen");
     const state = createInitialState("test");
     const result = await supervisorNode(state, mockModel, mockStream(), mockToken());
 
-    expect(result.nextAgent).toBe("researcher,coder");
-    expect(result.pendingAgents).toEqual(["researcher", "coder"]);
+    expect(result.nextAgent).toBe("coder,test_gen");
+    expect(result.pendingAgents).toEqual(["coder", "test_gen"]);
   });
 
   it("filters out planner when plan already exists", async () => {
@@ -99,8 +99,8 @@ describe("supervisorNode routing decisions", () => {
     mockCallModel.mockResolvedValue("coder");
     const state = createInitialState("Build an API");
     state.plan = [
-      "1. (researcher) Research",
-      "2. (coder) Implement",
+      "1. (coder) Implement",
+      "2. (test_gen) Write tests",
     ];
     state.planStep = 1;
 
@@ -109,7 +109,7 @@ describe("supervisorNode routing decisions", () => {
     const callArgs = mockBuildMessages.mock.calls[0][0];
     expect(callArgs.userQuestion).toContain("Plan exists: yes");
     expect(callArgs.userQuestion).toContain("2/2");
-    expect(callArgs.userQuestion).toContain("(coder) Implement");
+    expect(callArgs.userQuestion).toContain("(test_gen) Write tests");
   });
 
   it("indicates all plan steps addressed when plan is exhausted", async () => {
@@ -137,15 +137,15 @@ describe("supervisorNode routing decisions", () => {
     const state = createInitialState("test");
     state.messages.push(
       { role: "assistant", name: "planner", content: "plan" },
-      { role: "assistant", name: "researcher", content: "research" },
       { role: "assistant", name: "coder", content: "code" },
+      { role: "assistant", name: "test_gen", content: "tests" },
     );
 
     await supervisorNode(state, mockModel, mockStream(), mockToken());
 
     const callArgs = mockBuildMessages.mock.calls[0][0];
     expect(callArgs.userQuestion).toContain("planner");
-    expect(callArgs.userQuestion).toContain("researcher");
+    expect(callArgs.userQuestion).toContain("coder");
     expect(callArgs.userQuestion).toContain("coder");
   });
 });

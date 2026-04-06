@@ -49,6 +49,8 @@ export interface WriteResult {
   written: string[];
   /** Files that were skipped (e.g. outside workspace). */
   skipped: { filePath: string; reason: string }[];
+  /** Old content of files that existed before writing (for diff view). */
+  oldContents: Map<string, string>;
 }
 
 // ── Code-block parser ────────────────────────────────────────────────
@@ -250,7 +252,7 @@ export async function writeFileBlocks(
   blocks: ParsedFileBlock[],
   stream: vscode.ChatResponseStream,
 ): Promise<WriteResult> {
-  const result: WriteResult = { written: [], skipped: [] };
+  const result: WriteResult = { written: [], skipped: [], oldContents: new Map() };
 
   const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri;
   if (!workspaceRoot) {
@@ -312,10 +314,17 @@ export async function writeFileBlocks(
     const contentBytes = Buffer.from(block.content, "utf-8");
 
     try {
-      // Check if file already exists
+      // Check if file already exists and capture old content for diffs
       let isNew = false;
       try {
         await vscode.workspace.fs.stat(targetUri);
+        // File exists — try to capture old content for diff viewing
+        try {
+          const oldBytes = await vscode.workspace.fs.readFile(targetUri);
+          result.oldContents.set(block.filePath, Buffer.from(oldBytes).toString("utf-8"));
+        } catch {
+          // readFile failed but file exists — just skip old content capture
+        }
       } catch {
         isNew = true;
       }
@@ -362,7 +371,7 @@ export async function applyCodeToWorkspace(
 
   if (blocks.length === 0) {
     logger.info("fileWriter", "No file blocks with paths found — nothing to write");
-    return { written: [], skipped: [] };
+    return { written: [], skipped: [], oldContents: new Map() };
   }
 
   return writeFileBlocks(blocks, stream);

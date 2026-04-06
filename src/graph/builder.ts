@@ -15,6 +15,7 @@ import { AgentState, mergeState, frozenSnapshot } from "./state";
 import { routeSupervisor, routeReviewer, routeFromPlan, type RouteResult } from "./router";
 import { logger } from "../utils/logger";
 import { getSecurityConfig } from "../security/securityConfig";
+import { AgentOutputManager } from "../utils/agentOutputManager";
 
 /** Default per-agent timeout (ms). */
 const DEFAULT_AGENT_TIMEOUT_MS = 120_000; // 2 minutes
@@ -83,7 +84,6 @@ export const AGENT_DISPLAY: Record<string, { icon: string; label: string }> = {
   planner:     { icon: "📋", label: "Planner" },
   coder:       { icon: "💻", label: "Coder" },
   coder_pool:  { icon: "🏢", label: "Engineering Team" },
-  researcher:  { icon: "🔍", label: "Researcher" },
   reviewer:    { icon: "✅", label: "Reviewer" },
   integrator:  { icon: "🔗", label: "Integration Engineer" },
   ui_designer: { icon: "🎨", label: "UI Designer" },
@@ -353,6 +353,10 @@ export function buildGraph(config: GraphConfig) {
     stream.markdown(
       `\n> ⚡ **Parallel execution:** ${labels.join(" + ")}\n\n`
     );
+
+    // Reveal output channels for parallel agents
+    const outputMgr = AgentOutputManager.getInstance();
+    outputMgr.revealParallel(agentNames);
 
     // Start tracking all parallel agents
     if (tracker) {

@@ -112,7 +112,7 @@ describe("mergeState", () => {
   });
 
   it("overwrites pendingAgents (not append)", () => {
-    base.pendingAgents = ["researcher"];
+    base.pendingAgents = ["test_gen"];
     const update = { pendingAgents: ["coder", "test_gen"] };
     const merged = mergeState(base, update);
     // pendingAgents is a scalar-like field: overwrite, not append
@@ -315,7 +315,7 @@ describe("postAgentMessage / getMessagesFor", () => {
 
   it("retrieves broadcast messages", () => {
     const state = createInitialState("test");
-    postAgentMessage(state, "researcher", "*", "info", "Found relevant docs");
+    postAgentMessage(state, "test_gen", "*", "info", "Found relevant docs");
 
     const coderMsgs = getMessagesFor(state, "coder");
     const reviewerMsgs = getMessagesFor(state, "reviewer");

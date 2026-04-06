@@ -13,7 +13,6 @@ Break the user's request into a clear, numbered step-by-step plan.
 Available agents:
   coder       - writes/edits code for single-domain changes
   coder_pool  - spawns parallel domain coders for multi-file projects
-  researcher  - explains concepts, searches docs
   reviewer    - reviews code quality
   integrator  - merges parallel coder outputs into cohesive codebase
   ui_designer - designs UI components
@@ -27,10 +26,9 @@ Rules:
 5. Format as a numbered markdown list.
 
 Examples:
-  1. (researcher) Research best practices for OAuth2 token refresh
-  2. (coder_pool) Build the auth module, API routes, and data layer in parallel
-  3. (integrator) Merge domain outputs and write shared types
-  4. (reviewer) Review the implementation for security issues`;
+  1. (coder_pool) Build the auth module, API routes, and data layer in parallel
+  2. (integrator) Merge domain outputs and write shared types
+  3. (reviewer) Review the implementation for security issues`;
 
 export async function plannerNode(
   state: AgentState,

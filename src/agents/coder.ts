@@ -18,6 +18,8 @@ import {
   generateDiffReport,
   type QualityGateResult,
 } from "../utils/qualityGate";
+import { AgentOutputManager } from "../utils/agentOutputManager";
+import { showBatchDiffs } from "../utils/diffViewer";
 import type { TerminalResult } from "../graph/state";
 
 const SYSTEM_PROMPT = `You are the Coder agent — an expert software engineer who writes real files.
@@ -87,6 +89,13 @@ export async function coderNode(
     : `---\n\n#### \u{1F4BB} Coder \u2014 Writing code\n\n`;
   stream.markdown(header);
 
+  // ── Set up output channel for detailed LLM output ──
+  const outputMgr = AgentOutputManager.getInstance();
+  const taskSummary = [...state.messages].reverse().find(m => m.role === "user")?.content ?? "coding task";
+  outputMgr.startRun("coder", taskSummary);
+  outputMgr.reveal("coder");
+  stream.markdown(`> 📺 _Detailed output streaming to **Coder** output channel_\n\n`);
+
   // Build system prompt with capped sections
   let sysPrompt = SYSTEM_PROMPT;
 
@@ -116,18 +125,24 @@ export async function coderNode(
     maxReferencesChars: 10_000,
   });
 
-  const response = await callModel(model, messages, stream, token, "coder");
+  // Stream LLM output to the output channel, NOT the chat panel
+  const outputSink = { append: (text: string) => outputMgr.append("coder", text) };
+  const response = await callModel(model, messages, null, token, "coder", outputSink);
 
   postAgentMessage(state, "coder", "*", "info", response);
   logger.agentMessage("coder", "*", "Code posted to message bus");
 
   // ── Apply code blocks to the workspace ──────────────────────────────
   let writtenFiles: string[] = [];
+  let allOldContents: Map<string, string> = new Map();
   try {
     const result = await applyCodeToWorkspace(response, stream);
     writtenFiles = result.written;
+    allOldContents = result.oldContents;
     if (writtenFiles.length > 0) {
       logger.info("coder", `Applied ${writtenFiles.length} file(s) to workspace: ${writtenFiles.join(", ")}`);
+      // Show inline diffs for modified files (like Copilot/Claude)
+      await showBatchDiffs(writtenFiles, allOldContents);
     } else {
       logger.warn("coder", "No file blocks with paths found in LLM response — nothing written to disk");
     }
@@ -186,13 +201,17 @@ export async function coderNode(
           maxReferencesChars: 6_000,
         });
 
-        const fixResponse = await callModel(model, fixMessages, stream, token, `coder-fix-${attempt + 1}`);
+        outputMgr.append("coder", `\n--- Fix attempt ${attempt + 1} ---\n`);
+        const fixResponse = await callModel(model, fixMessages, null, token, `coder-fix-${attempt + 1}`, outputSink);
         lastResponse = fixResponse;
 
         try {
           const fixResult = await applyCodeToWorkspace(fixResponse, stream);
           if (fixResult.written.length > 0) {
             writtenFiles.push(...fixResult.written);
+            // Merge old contents
+            for (const [k, v] of fixResult.oldContents) { allOldContents.set(k, v); }
+            await showBatchDiffs(fixResult.written, fixResult.oldContents);
             logger.info("coder", `Fix attempt ${attempt + 1}: wrote ${fixResult.written.length} file(s)`);
           }
         } catch (err: any) {
@@ -205,6 +224,7 @@ export async function coderNode(
         const diff = qaReport.diff || await generateDiffReport(wsRoot, writtenFiles);
         if (diff && diff.trim().length > 50) {
           stream.markdown(`\n> 🔍 **Self-reviewing** changes before peer review…\n`);
+          outputMgr.append("coder", "\n--- Self-review ---\n");
 
           const reviewMessages = buildMessages({
             systemPrompt: SELF_REVIEW_PROMPT +
@@ -217,13 +237,15 @@ export async function coderNode(
             maxWorkspaceChars: 4_000,
           });
 
-          const reviewResp = await callModel(model, reviewMessages, stream, token, "coder-self-review");
+          const reviewResp = await callModel(model, reviewMessages, null, token, "coder-self-review", outputSink);
 
           if (!reviewResp.toUpperCase().includes("LGTM")) {
             try {
               const fixResult = await applyCodeToWorkspace(reviewResp, stream);
               if (fixResult.written.length > 0) {
                 writtenFiles.push(...fixResult.written);
+                for (const [k, v] of fixResult.oldContents) { allOldContents.set(k, v); }
+                await showBatchDiffs(fixResult.written, fixResult.oldContents);
                 lastResponse = reviewResp;
                 logger.info("coder", `Self-review: fixed ${fixResult.written.length} file(s)`);
                 // Quick re-validation after self-review fixes
@@ -268,6 +290,10 @@ export async function coderNode(
   const cappedResponse = lastResponse.length > 6000
     ? lastResponse.slice(0, 6000) + "\n[... code truncated in state]"
     : lastResponse;
+
+  // ── End the output channel run ──
+  const totalDuration = Date.now() - (state.artifacts["_coderStartMs"] ? Number(state.artifacts["_coderStartMs"]) : Date.now());
+  outputMgr.endRun("coder", totalDuration, writtenFiles.length > 0);
 
   const newMessage: AgentMessage = {
     role: "assistant",

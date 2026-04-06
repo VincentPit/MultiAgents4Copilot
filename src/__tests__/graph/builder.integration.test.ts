@@ -45,12 +45,12 @@ function mockToken(cancelled = false) {
 // ── Full plan-driven execution tests ─────────────────────────────────
 
 describe("Plan-driven sequential execution", () => {
-  it("executes plan steps in exact order: researcher → coder → reviewer", async () => {
+  it("executes plan steps in exact order: coder → test_gen → reviewer", async () => {
     const executionOrder: string[] = [];
 
     // This test reproduces the EXACT scenario that caused Bug #1.
-    // Pre-fix: planner → researcher → supervisor → researcher → supervisor → ...
-    // Post-fix: planner → researcher → coder → reviewer → done
+    // Pre-fix: planner → coder → supervisor → coder → supervisor → ...
+    // Post-fix: planner → coder → test_gen → reviewer → done
     const nodes: Record<string, AgentNode> = {
       supervisor: async (state) => {
         executionOrder.push("supervisor");
@@ -65,23 +65,23 @@ describe("Plan-driven sequential execution", () => {
         executionOrder.push("planner");
         return {
           plan: [
-            "1. (researcher) Research best practices",
-            "2. (coder) Implement the solution",
+            "1. (coder) Implement the solution",
+            "2. (test_gen) Generate tests",
             "3. (reviewer) Review the code",
           ],
           messages: [{ role: "assistant" as const, content: "plan created", name: "planner" }],
-        };
-      },
-      researcher: async () => {
-        executionOrder.push("researcher");
-        return {
-          messages: [{ role: "assistant" as const, content: "research done", name: "researcher" }],
         };
       },
       coder: async () => {
         executionOrder.push("coder");
         return {
           messages: [{ role: "assistant" as const, content: "code written", name: "coder" }],
+        };
+      },
+      test_gen: async () => {
+        executionOrder.push("test_gen");
+        return {
+          messages: [{ role: "assistant" as const, content: "tests generated", name: "test_gen" }],
         };
       },
       reviewer: async () => {
@@ -102,8 +102,8 @@ describe("Plan-driven sequential execution", () => {
     expect(executionOrder).toEqual([
       "supervisor",   // Initial: routes to planner
       "planner",      // Creates 3-step plan
-      "researcher",   // Plan step 0: (researcher)
-      "coder",        // Plan step 1: (coder) — directly chained, NOT via supervisor
+      "coder",        // Plan step 0: (coder)
+      "test_gen",     // Plan step 1: (test_gen) — directly chained, NOT via supervisor
       "reviewer",     // Plan step 2: (reviewer) — directly chained
       // reviewer returns approve → done via routeReviewer
     ]);
@@ -125,18 +125,12 @@ describe("Plan-driven sequential execution", () => {
       },
       planner: async () => ({
         plan: [
-          "1. (researcher) Research",
-          "2. (coder) Code",
-          "3. (test_gen) Test",
+          "1. (coder) Code",
+          "2. (test_gen) Test",
+          "3. (ui_designer) Design",
         ],
         messages: [{ role: "assistant" as const, content: "plan", name: "planner" }],
       }),
-      researcher: async (state) => {
-        planStepLog.push(state.planStep);
-        return {
-          messages: [{ role: "assistant" as const, content: "done", name: "researcher" }],
-        };
-      },
       coder: async (state) => {
         planStepLog.push(state.planStep);
         return {
@@ -149,6 +143,12 @@ describe("Plan-driven sequential execution", () => {
           messages: [{ role: "assistant" as const, content: "done", name: "test_gen" }],
         };
       },
+      ui_designer: async (state) => {
+        planStepLog.push(state.planStep);
+        return {
+          messages: [{ role: "assistant" as const, content: "done", name: "ui_designer" }],
+        };
+      },
     };
 
     const graph = buildGraph({ nodes, entryPoint: "supervisor", maxSteps: 20 });
@@ -156,7 +156,7 @@ describe("Plan-driven sequential execution", () => {
     await graph.run(state, mockModel, mockStream(), mockToken());
 
     // Each agent should see an incremented planStep
-    // researcher sees step 0, coder sees step 1, test_gen sees step 2
+    // coder sees step 0, test_gen sees step 1, ui_designer sees step 2
     expect(planStepLog).toEqual([0, 1, 2]);
   });
 
@@ -174,16 +174,16 @@ describe("Plan-driven sequential execution", () => {
       },
       planner: async () => ({
         plan: [
-          "1. (researcher) Research OAuth2",
-          "2. (coder) Implement auth module",
+          "1. (coder) Research OAuth2",
+          "2. (test_gen) Test auth module",
         ],
         messages: [{ role: "assistant" as const, content: "plan", name: "planner" }],
       }),
-      researcher: async () => ({
-        messages: [{ role: "assistant" as const, content: "done", name: "researcher" }],
-      }),
       coder: async () => ({
         messages: [{ role: "assistant" as const, content: "done", name: "coder" }],
+      }),
+      test_gen: async () => ({
+        messages: [{ role: "assistant" as const, content: "done", name: "test_gen" }],
       }),
     };
 
@@ -198,12 +198,12 @@ describe("Plan-driven sequential execution", () => {
     expect(supervisorCalls).toBe(2);
   });
 
-  it("researcher does NOT loop when it is a plan step (Bug #1 regression)", async () => {
+  it("test_gen does NOT loop when it is a plan step (Bug #1 regression)", async () => {
     // This is the EXACT reproduction of the original bug:
-    // Plan has researcher as step 0. Pre-fix, researcher would
+    // Plan has test_gen as step 0. Pre-fix, test_gen would
     // bounce back to supervisor, supervisor would call routeFromPlan
     // which returns step 0 again (because planStep was never advanced).
-    let researcherCalls = 0;
+    let testGenCalls = 0;
 
     const nodes: Record<string, AgentNode> = {
       supervisor: async (state) => {
@@ -214,15 +214,15 @@ describe("Plan-driven sequential execution", () => {
       },
       planner: async () => ({
         plan: [
-          "1. (researcher) Research best practices",
+          "1. (test_gen) Generate test cases",
           "2. (coder) Implement solution",
         ],
         messages: [{ role: "assistant" as const, content: "plan", name: "planner" }],
       }),
-      researcher: async () => {
-        researcherCalls++;
+      test_gen: async () => {
+        testGenCalls++;
         return {
-          messages: [{ role: "assistant" as const, content: "research complete", name: "researcher" }],
+          messages: [{ role: "assistant" as const, content: "tests generated", name: "test_gen" }],
         };
       },
       coder: async () => ({
@@ -234,8 +234,8 @@ describe("Plan-driven sequential execution", () => {
     const state = createInitialState("Make the app safer");
     await graph.run(state, mockModel, mockStream(), mockToken());
 
-    // Researcher should be called EXACTLY ONCE — not 7 times like the original bug
-    expect(researcherCalls).toBe(1);
+    // test_gen should be called EXACTLY ONCE — not 7 times like the original bug
+    expect(testGenCalls).toBe(1);
   });
 });
 
@@ -302,17 +302,17 @@ describe("Consecutive same-agent loop detection", () => {
         executionOrder.push("planner");
         return {
           plan: [
-            "1. (researcher) Research",
+            "1. (test_gen) Test",
             "2. (coder) Code",
-            "3. (researcher) Verify",
+            "3. (test_gen) Verify",
           ],
           messages: [{ role: "assistant" as const, content: "plan", name: "planner" }],
         };
       },
-      researcher: async () => {
-        executionOrder.push("researcher");
+      test_gen: async () => {
+        executionOrder.push("test_gen");
         return {
-          messages: [{ role: "assistant" as const, content: "done", name: "researcher" }],
+          messages: [{ role: "assistant" as const, content: "done", name: "test_gen" }],
         };
       },
       coder: async () => {
@@ -337,8 +337,8 @@ describe("Consecutive same-agent loop detection", () => {
   });
 
   it("resets consecutive count when a different agent runs", async () => {
-    // Supervisor routes to coder twice, then researcher, then coder twice
-    // The coder count should reset when researcher runs in between
+    // Supervisor routes to coder twice, then test_gen, then coder twice
+    // The coder count should reset when test_gen runs in between
     let callIndex = 0;
     let coderCalls = 0;
 
@@ -346,7 +346,7 @@ describe("Consecutive same-agent loop detection", () => {
       supervisor: async () => {
         callIndex++;
         if (callIndex <= 2) { return { nextAgent: "coder" }; }
-        if (callIndex === 3) { return { nextAgent: "researcher" }; }
+        if (callIndex === 3) { return { nextAgent: "test_gen" }; }
         if (callIndex <= 5) { return { nextAgent: "coder" }; }
         return { nextAgent: "finish" };
       },
@@ -356,8 +356,8 @@ describe("Consecutive same-agent loop detection", () => {
           messages: [{ role: "assistant" as const, content: "code", name: "coder" }],
         };
       },
-      researcher: async () => ({
-        messages: [{ role: "assistant" as const, content: "research", name: "researcher" }],
+      test_gen: async () => ({
+        messages: [{ role: "assistant" as const, content: "analysis", name: "test_gen" }],
       }),
     };
 
@@ -366,13 +366,13 @@ describe("Consecutive same-agent loop detection", () => {
     const stream = mockStream();
     await graph.run(state, mockModel, stream, mockToken());
 
-    // Should NOT trigger loop detection because researcher breaks the coder streak
+    // Should NOT trigger loop detection because test_gen breaks the coder streak
     const mdCalls = (stream.markdown as jest.Mock).mock.calls.map((c: any[]) => c[0]);
     const hasLoopWarning = mdCalls.some((m: string) =>
       m.includes("loop") && m.includes("consecutively")
     );
     expect(hasLoopWarning).toBe(false);
-    // Coder should have been called 4 times (2 before researcher, 2 after)
+    // Coder should have been called 4 times (2 before test_gen, 2 after)
     expect(coderCalls).toBe(4);
   });
 });
@@ -478,16 +478,16 @@ describe("Plan-driven parallel steps", () => {
       },
       planner: async () => ({
         plan: [
-          "1. (researcher) Research the problem",
+          "1. (test_gen) Analyze the requirements",
           "2. (coder, ui_designer) Build backend and frontend in parallel",
           "3. (reviewer) Final review",
         ],
         messages: [{ role: "assistant" as const, content: "plan", name: "planner" }],
       }),
-      researcher: async () => {
-        executionOrder.push("researcher");
+      test_gen: async () => {
+        executionOrder.push("test_gen");
         return {
-          messages: [{ role: "assistant" as const, content: "research", name: "researcher" }],
+          messages: [{ role: "assistant" as const, content: "analysis", name: "test_gen" }],
         };
       },
       coder: async () => {
@@ -516,8 +516,8 @@ describe("Plan-driven parallel steps", () => {
     const state = createInitialState("Build a web app");
     const result = await graph.run(state, mockModel, mockStream(), mockToken());
 
-    // Step 0: researcher (sequential)
-    expect(executionOrder.indexOf("researcher")).toBeLessThan(executionOrder.indexOf("reviewer"));
+    // Step 0: test_gen (sequential)
+    expect(executionOrder.indexOf("test_gen")).toBeLessThan(executionOrder.indexOf("reviewer"));
     // Step 1: coder + ui_designer (parallel) — both before reviewer
     expect(executionOrder).toContain("coder");
     expect(executionOrder).toContain("ui_designer");
@@ -606,14 +606,14 @@ describe("State accumulation during plan execution", () => {
       },
       planner: async () => ({
         plan: [
-          "1. (researcher) Research",
+          "1. (test_gen) Generate tests",
           "2. (coder) Implement",
         ],
         messages: [{ role: "assistant" as const, content: "plan made", name: "planner" }],
       }),
-      researcher: async () => ({
-        messages: [{ role: "assistant" as const, content: "OAuth2 best practices", name: "researcher" }],
-        artifacts: { research: "OAuth2 analysis" },
+      test_gen: async () => ({
+        messages: [{ role: "assistant" as const, content: "OAuth2 test plan", name: "test_gen" }],
+        artifacts: { test_plan: "OAuth2 test analysis" },
       }),
       coder: async () => ({
         messages: [{ role: "assistant" as const, content: "auth module written", name: "coder" }],
@@ -630,11 +630,11 @@ describe("State accumulation during plan execution", () => {
       .map(m => m.name)
       .filter(Boolean);
     expect(agentNames).toContain("planner");
-    expect(agentNames).toContain("researcher");
+    expect(agentNames).toContain("test_gen");
     expect(agentNames).toContain("coder");
 
     // All artifacts should be merged
-    expect(result.state.artifacts["research"]).toBe("OAuth2 analysis");
+    expect(result.state.artifacts["test_plan"]).toBe("OAuth2 test analysis");
     expect(result.state.artifacts["last_code"]).toBe("const auth = ...");
   });
 
@@ -646,13 +646,13 @@ describe("State accumulation during plan execution", () => {
       },
       planner: async () => ({
         plan: [
-          "1. (researcher) Step one",
+          "1. (test_gen) Step one",
           "2. (coder) Step two",
         ],
         messages: [{ role: "assistant" as const, content: "plan", name: "planner" }],
       }),
-      researcher: async () => ({
-        messages: [{ role: "assistant" as const, content: "done", name: "researcher" }],
+      test_gen: async () => ({
+        messages: [{ role: "assistant" as const, content: "done", name: "test_gen" }],
       }),
       coder: async () => ({
         messages: [{ role: "assistant" as const, content: "done", name: "coder" }],
@@ -664,7 +664,7 @@ describe("State accumulation during plan execution", () => {
     const result = await graph.run(state, mockModel, mockStream(), mockToken());
 
     expect(result.state.plan).toHaveLength(2);
-    expect(result.state.plan[0]).toContain("researcher");
+    expect(result.state.plan[0]).toContain("test_gen");
     expect(result.state.plan[1]).toContain("coder");
   });
 });

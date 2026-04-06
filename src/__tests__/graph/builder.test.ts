@@ -143,16 +143,16 @@ describe("buildGraph", () => {
         supervisorCalls++;
         if (supervisorCalls === 1) {
           return {
-            nextAgent: "researcher,coder",
-            pendingAgents: ["researcher", "coder"],
+            nextAgent: "coder,test_gen",
+            pendingAgents: ["coder", "test_gen"],
           };
         }
         return { nextAgent: "finish" };
       },
-      researcher: async () => {
-        executionLog.push({ agent: "researcher", time: Date.now() - startTime });
+      test_gen: async () => {
+        executionLog.push({ agent: "test_gen", time: Date.now() - startTime });
         return {
-          messages: [{ role: "assistant" as const, content: "research done", name: "researcher" }],
+          messages: [{ role: "assistant" as const, content: "tests done", name: "test_gen" }],
         };
       },
       coder: async () => {
@@ -169,7 +169,7 @@ describe("buildGraph", () => {
     const result = await graph.run(state, mockModel, stream, mockToken());
 
     // Both agents should have been invoked
-    expect(executionLog.some(e => e.agent === "researcher")).toBe(true);
+    expect(executionLog.some(e => e.agent === "test_gen")).toBe(true);
     expect(executionLog.some(e => e.agent === "coder")).toBe(true);
 
     // Parallel runs should be marked as such
@@ -184,15 +184,15 @@ describe("buildGraph", () => {
         supervisorCalls++;
         if (supervisorCalls === 1) {
           return {
-            nextAgent: "researcher,coder",
-            pendingAgents: ["researcher", "coder"],
+            nextAgent: "coder,test_gen",
+            pendingAgents: ["coder", "test_gen"],
           };
         }
         return { nextAgent: "finish" };
       },
-      researcher: async () => ({
-        messages: [{ role: "assistant" as const, content: "research findings", name: "researcher" }],
-        artifacts: { research: "OAuth2 best practices" },
+      test_gen: async () => ({
+        messages: [{ role: "assistant" as const, content: "test findings", name: "test_gen" }],
+        artifacts: { test_results: "All tests passed" },
       }),
       coder: async () => ({
         messages: [{ role: "assistant" as const, content: "implementation done", name: "coder" }],
@@ -206,11 +206,11 @@ describe("buildGraph", () => {
 
     // Both agents' messages should be in final state
     const names = result.state.messages.map(m => m.name).filter(Boolean);
-    expect(names).toContain("researcher");
+    expect(names).toContain("test_gen");
     expect(names).toContain("coder");
 
     // Both agents' artifacts should be merged
-    expect(result.state.artifacts["research"]).toBe("OAuth2 best practices");
+    expect(result.state.artifacts["test_results"]).toBe("All tests passed");
     expect(result.state.artifacts["last_code"]).toBe("const auth = ...");
   });
 
@@ -221,14 +221,14 @@ describe("buildGraph", () => {
         supervisorCalls++;
         if (supervisorCalls === 1) {
           return {
-            nextAgent: "researcher,coder",
-            pendingAgents: ["researcher", "coder"],
+            nextAgent: "test_gen,coder",
+            pendingAgents: ["test_gen", "coder"],
           };
         }
         return { nextAgent: "finish" };
       },
-      researcher: async () => {
-        throw new Error("Research API down");
+      test_gen: async () => {
+        throw new Error("Test runner crashed");
       },
       coder: async () => ({
         messages: [{ role: "assistant" as const, content: "code works", name: "coder" }],
@@ -241,7 +241,7 @@ describe("buildGraph", () => {
     const result = await graph.run(state, mockModel, stream, mockToken());
 
     // Error should be recorded
-    expect(result.state.errors.some(e => e.includes("Research API down"))).toBe(true);
+    expect(result.state.errors.some(e => e.includes("Test runner crashed"))).toBe(true);
     // Coder's result should still be present
     expect(result.state.messages.some(m => m.name === "coder")).toBe(true);
   });
@@ -253,14 +253,14 @@ describe("buildGraph", () => {
         supervisorCalls++;
         if (supervisorCalls === 1) {
           return {
-            nextAgent: "researcher,coder",
-            pendingAgents: ["researcher", "coder"],
+            nextAgent: "coder,test_gen",
+            pendingAgents: ["coder", "test_gen"],
           };
         }
         return { nextAgent: "finish" };
       },
-      researcher: async () => ({
-        messages: [{ role: "assistant" as const, content: "done", name: "researcher" }],
+      test_gen: async () => ({
+        messages: [{ role: "assistant" as const, content: "done", name: "test_gen" }],
       }),
       coder: async () => ({
         messages: [{ role: "assistant" as const, content: "done", name: "coder" }],
@@ -290,21 +290,21 @@ describe("buildGraph", () => {
       },
       planner: async () => ({
         plan: [
-          "1. (researcher) Research best practices",
-          "2. (coder) Implement the solution",
+          "1. (coder) Implement the solution",
+          "2. (test_gen) Write tests for the implementation",
         ],
         messages: [{ role: "assistant" as const, content: "plan created", name: "planner" }],
       }),
-      researcher: async () => {
-        executedAgents.push("researcher");
-        return {
-          messages: [{ role: "assistant" as const, content: "research done", name: "researcher" }],
-        };
-      },
       coder: async () => {
         executedAgents.push("coder");
         return {
           messages: [{ role: "assistant" as const, content: "code done", name: "coder" }],
+        };
+      },
+      test_gen: async () => {
+        executedAgents.push("test_gen");
+        return {
+          messages: [{ role: "assistant" as const, content: "tests done", name: "test_gen" }],
         };
       },
     };
@@ -320,7 +320,7 @@ describe("buildGraph", () => {
 
 describe("AGENT_DISPLAY", () => {
   it("has display config for all standard agents", () => {
-    const expected = ["supervisor", "planner", "coder", "coder_pool", "researcher", "reviewer", "integrator", "ui_designer", "test_gen"];
+    const expected = ["supervisor", "planner", "coder", "coder_pool", "reviewer", "integrator", "ui_designer", "test_gen"];
     for (const name of expected) {
       expect(AGENT_DISPLAY[name]).toBeDefined();
       expect(AGENT_DISPLAY[name].icon).toBeTruthy();
@@ -501,12 +501,12 @@ describe("buildGraph — coder_pool fallback", () => {
       supervisor: async (state) => {
         supervisorCallCount++;
         if (supervisorCallCount === 1) {
-          return { nextAgent: "researcher" };
+          return { nextAgent: "test_gen" };
         }
-        // After researcher fails, supervisor is called again
+        // After test_gen fails, supervisor is called again
         return { nextAgent: "finish" };
       },
-      researcher: async () => {
+      test_gen: async () => {
         throw new Error("Model unavailable");
       },
     };
@@ -521,7 +521,7 @@ describe("buildGraph — coder_pool fallback", () => {
       (m: { name?: string }) => m.name === "graph-router"
     );
     expect(routerMsgs.length).toBeGreaterThanOrEqual(1);
-    expect(routerMsgs[0].content).toContain("researcher");
+    expect(routerMsgs[0].content).toContain("test_gen");
     expect(routerMsgs[0].content).toContain("Do NOT route");
   });
 
@@ -531,10 +531,10 @@ describe("buildGraph — coder_pool fallback", () => {
       supervisor: async () => {
         supervisorCalls++;
         // Route to different agents that all fail
-        const targets = ["researcher", "coder", "test_gen", "reviewer"];
+        const targets = ["ui_designer", "coder", "test_gen", "reviewer"];
         return { nextAgent: targets[supervisorCalls - 1] ?? "finish" };
       },
-      researcher: async () => { throw new Error("fail1"); },
+      ui_designer: async () => { throw new Error("fail1"); },
       coder: async () => { throw new Error("fail2"); },
       test_gen: async () => { throw new Error("fail3"); },
       reviewer: async () => ({ nextAgent: "finish" }),
@@ -610,13 +610,13 @@ describe("ProgressTracker", () => {
     const stream = mockStream();
     const tracker = new ProgressTracker(stream, Date.now());
 
-    tracker.startParallelAgents(["coder", "researcher"]);
+    tracker.startParallelAgents(["coder", "test_gen"]);
 
     const lastCall = (stream.progress as jest.Mock).mock.calls.at(-1)?.[0] as string;
     expect(lastCall).toContain("Parallel");
 
     tracker.completeParallelAgent("coder", 3000);
-    tracker.completeParallelAgent("researcher", 4000);
+    tracker.completeParallelAgent("test_gen", 4000);
     tracker.endParallelBatch();
 
     tracker.dispose();
@@ -671,11 +671,11 @@ describe("ProgressTracker", () => {
     const tracker = new ProgressTracker(stream, Date.now());
 
     // Agent that completed — the completion card should contain block chars
-    tracker.startAgent("researcher");
-    tracker.completeAgent("researcher", 60_000); // 60s of 120s timeout = ~half
+    tracker.startAgent("planner");
+    tracker.completeAgent("planner", 60_000); // 60s of 120s timeout = ~half
 
     const mdCalls = (stream.markdown as jest.Mock).mock.calls.map((c: any[]) => c[0]);
-    const card = mdCalls.find((m: string) => m.includes("Researcher") && m.includes("▓"));
+    const card = mdCalls.find((m: string) => m.includes("Planner") && m.includes("▓"));
     expect(card).toBeDefined();
     // Should contain both filled and empty blocks
     expect(card).toContain("▓");

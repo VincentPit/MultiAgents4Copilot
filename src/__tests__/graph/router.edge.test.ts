@@ -46,11 +46,11 @@ describe("routeFromPlan — edge cases", () => {
   });
 
   it("filters out invalid agents from multi-agent plan step", () => {
-    state.plan = ["1. (coder, invalid_agent, researcher) Work together"];
+    state.plan = ["1. (coder, invalid_agent, test_gen) Work together"];
     state.planStep = 0;
     const result = routeFromPlan(state);
     expect(result).not.toBeNull();
-    expect(result!.agents).toEqual(["coder", "researcher"]);
+    expect(result!.agents).toEqual(["coder", "test_gen"]);
     expect(result!.parallel).toBe(true);
   });
 
@@ -117,7 +117,7 @@ describe("routeSupervisor — additional edge cases", () => {
   });
 
   it("deduplicates agents in comma-separated list (if doubled)", () => {
-    state.nextAgent = "coder,coder,researcher";
+    state.nextAgent = "coder,coder,test_gen";
     const result = routeSupervisor(state);
     // The router doesn't deduplicate — it returns all valid ones
     // This is a documentation of current behavior
@@ -141,9 +141,9 @@ describe("routeSupervisor — additional edge cases", () => {
   });
 
   it("handles three-way parallel dispatch", () => {
-    state.nextAgent = "researcher,coder,test_gen";
+    state.nextAgent = "coder,test_gen,ui_designer";
     const result = routeSupervisor(state);
-    expect(result.agents).toEqual(["researcher", "coder", "test_gen"]);
+    expect(result.agents).toEqual(["coder", "test_gen", "ui_designer"]);
     expect(result.parallel).toBe(true);
   });
 });

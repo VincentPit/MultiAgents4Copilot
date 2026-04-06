@@ -22,16 +22,12 @@
         "id": "multi-agent-copilot.team",
         "fullName": "Multi-Agent Copilot",
         "name": "team",
-        "description": "A graph-based multi-agent system that routes your request through specialized agents (planner, researcher, coder, reviewer).",
+        "description": "A graph-based multi-agent system that routes your request through specialized agents (planner, coder, reviewer).",
         "isSticky": true,
         "commands": [
           {
             "name": "plan",
             "description": "Create a step-by-step plan for a task"
-          },
-          {
-            "name": "research",
-            "description": "Research a topic using web search and GitHub"
           },
           {
             "name": "code",

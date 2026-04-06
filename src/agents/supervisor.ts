@@ -13,7 +13,6 @@ Your team:
   planner - breaks tasks into step-by-step plans
   coder - writes/edits code for SIMPLE single-domain changes
   coder_pool - spawns PARALLEL domain coders for complex multi-file projects
-  researcher - explains concepts, searches docs
   reviewer - reviews code quality
   integrator - merges outputs from parallel coders, writes glue code
   ui_designer - designs UI components
@@ -35,16 +34,16 @@ Routing rules:
 - If tasks need dependencies installed or builds run: route to "coder".
 - If tests need to be written and executed: route to "test_gen".
 - If reviewer approved: respond "FINISH".
-- Simple questions: use "researcher".
+- Simple questions: use "planner" to think through an answer.
 
 PARALLEL EXECUTION:
   When multiple agents can work INDEPENDENTLY on the current step, list them
-  separated by commas. Example: "researcher,coder" runs both at the same time.
+  separated by commas. Example: "coder,test_gen" runs both at the same time.
   Only combine agents whose work does NOT depend on each other.
 
 Reply with one or more agent names (comma-separated for parallel):
-  planner | coder | coder_pool | researcher | reviewer | integrator | ui_designer | test_gen | FINISH
-Examples: "planner", "coder_pool", "researcher,coder", "integrator", "FINISH"`;
+  planner | coder | coder_pool | reviewer | integrator | ui_designer | test_gen | FINISH
+Examples: "planner", "coder_pool", "coder,test_gen", "integrator", "FINISH"`;
 
 export async function supervisorNode(
   state: AgentState,
@@ -107,7 +106,7 @@ export async function supervisorNode(
   const response = await callModel(model, messages, null, token, "supervisor");
   const raw = response.trim().toLowerCase();
 
-  const valid = new Set(["planner", "coder", "coder_pool", "researcher", "reviewer", "ui_designer", "test_gen", "integrator", "finish"]);
+  const valid = new Set(["planner", "coder", "coder_pool", "reviewer", "ui_designer", "test_gen", "integrator", "finish"]);
 
   // Parse comma-separated or single agent names
   const candidates = raw
@@ -148,7 +147,7 @@ export async function supervisorNode(
   const pendingAgents = agents.length > 1 ? agents : [];
 
   const icons: Record<string, string> = {
-    planner: "\u{1F4CB}", coder: "\u{1F4BB}", coder_pool: "\u{1F3E2}", researcher: "\u{1F50D}", reviewer: "\u2705",
+    planner: "\u{1F4CB}", coder: "\u{1F4BB}", coder_pool: "\u{1F3E2}", reviewer: "\u2705",
     ui_designer: "\u{1F3A8}", test_gen: "\u{1F9EA}", integrator: "\u{1F517}",
   };
 

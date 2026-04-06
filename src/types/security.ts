@@ -58,7 +58,6 @@ export interface CircuitBreakerConfig {
 /** The canonical list of agent identifiers used system-wide */
 export const CANONICAL_AGENT_IDS = [
   "planner",
-  "researcher",
   "coder",
   "coder_pool",
   "integrator",
