@@ -25,7 +25,11 @@ import { callModel, buildMessages, capContext } from "./base";
 import { logger } from "../utils/logger";
 import { applyCodeToWorkspace } from "../utils/fileWriter";
 import { runCommandsFromOutput } from "../utils/terminalRunner";
-import { runBuildValidation, formatBuildErrorsForLLM, type BuildResult } from "../utils/buildValidator";
+import {
+  runFullQualityGate,
+  formatQualityReportForLLM,
+  type QualityGateResult,
+} from "../utils/qualityGate";
 import type { TerminalResult } from "../graph/state";
 
 const SYSTEM_PROMPT = `You are the Integration Engineer — a Staff-level tech lead who merges
@@ -59,6 +63,14 @@ OUTPUT FORMAT:
    - ✅ Contracts validated
    - 🔗 Glue files created
    - ⚠️ Issues found (if any)
+
+AFTER INTEGRATION, YOUR CODE RUNS THROUGH THE FULL CI PIPELINE:
+  • Full project type-check (tsc --noEmit)
+  • Full project lint (eslint)
+  • Full test suite — catch regressions!
+  • Full diff review — architecture consistency
+You are the LAST LINE OF DEFENSE before code review. If your integration
+breaks tests or introduces regressions, YOU must fix it.
 
 SELF-PROTECTION — NEVER modify files belonging to the Multi-Agent Copilot
 extension itself. The extension's own source code (src/agents/, src/graph/,
@@ -106,14 +118,14 @@ export async function integratorNode(
   sysPrompt += `\n\n## Domain Contract Map\n${contractMap}`;
   sysPrompt += `\n\n## Domain Outputs\n${capContext(domainSummaries, 30_000)}`;
 
-  // ── Inject build errors from previous agents ──
-  // If coders left build errors, the integrator needs to know about them
+  // ── Inject quality issues from previous agents ──
+  // If coders left quality gate failures, the integrator needs to know
   // so it can fix cross-domain issues as part of integration.
-  const priorBuildErrors = state.artifacts["build_errors"] ?? "";
-  if (priorBuildErrors) {
-    sysPrompt += `\n\n## ⚠️ EXISTING BUILD ERRORS FROM CODERS\n` +
-      `The domain coders left these unresolved compilation errors.\n` +
-      `You MUST fix these as part of your integration work:\n\n${capContext(priorBuildErrors, 5_000)}`;
+  const priorQualityErrors = state.artifacts["quality_errors"] ?? state.artifacts["build_errors"] ?? "";
+  if (priorQualityErrors) {
+    sysPrompt += `\n\n## ⚠️ EXISTING QUALITY ISSUES FROM CODERS\n` +
+      `The domain coders left these unresolved quality issues (build/lint/test).\n` +
+      `You MUST fix these as part of your integration work:\n\n${capContext(priorQualityErrors, 5_000)}`;
   }
 
   const lastUserContent =
@@ -149,48 +161,49 @@ export async function integratorNode(
     stream.markdown(`\n> ⚠️ Integration file write error: ${err?.message}\n`);
   }
 
-  // ── Build validation + fix loop ──
-  // The integrator is the LAST LINE OF DEFENSE before code goes to the
-  // reviewer. If the build fails here, the integrator must fix it.
+  // ── Full CI Pipeline (Staff Engineer Quality Gate) ──
+  // The integrator runs the FULL CI pipeline — build, lint, ALL tests.
+  // This is the last line of defense before code goes to the reviewer.
+  // Like a Staff Engineer running the complete test suite after merging.
   const MAX_INTEGRATOR_FIX_RETRIES = 2;
-  let buildResult: BuildResult | null = null;
+  let qaReport: QualityGateResult | null = null;
   const wsRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
   if (wsRoot) {
     for (let attempt = 0; attempt <= MAX_INTEGRATOR_FIX_RETRIES; attempt++) {
       if (token.isCancellationRequested) { break; }
 
-      buildResult = await runBuildValidation(wsRoot);
+      qaReport = await runFullQualityGate(wsRoot);
 
-      if (buildResult.success) {
-        stream.markdown(`\n> ✅ **Integration build passed** — codebase compiles cleanly.\n`);
+      if (qaReport.passed) {
+        stream.markdown(`\n> ✅ **Full CI pipeline passed** — ${qaReport.summary}\n`);
         break;
       }
 
       if (attempt >= MAX_INTEGRATOR_FIX_RETRIES) {
         stream.markdown(
-          `\n> ⚠️ **Build still failing** after ${MAX_INTEGRATOR_FIX_RETRIES} integration fix attempt(s). ` +
-          `${buildResult.errorCount} error(s) remain.\n`
+          `\n> ⚠️ **CI pipeline still failing** after ${MAX_INTEGRATOR_FIX_RETRIES} fix attempt(s). ` +
+          `${qaReport.summary}\n`
         );
         break;
       }
 
-      const errorReport = formatBuildErrorsForLLM(buildResult);
+      const qualityReport = formatQualityReportForLLM(qaReport);
       stream.markdown(
-        `\n> 🔧 **Integration build failed** (${buildResult.errorCount} error(s)) — ` +
-        `fixing (attempt ${attempt + 1}/${MAX_INTEGRATOR_FIX_RETRIES})…\n`
+        `\n> 🔧 **CI pipeline failed** (${qaReport.summary}) — ` +
+        `Staff Engineer fixing (attempt ${attempt + 1}/${MAX_INTEGRATOR_FIX_RETRIES})…\n`
       );
 
       const fixMessages = buildMessages({
         systemPrompt: SYSTEM_PROMPT +
-          `\n\n## ❌ BUILD ERRORS — FIX THESE NOW\n` +
-          `The codebase has the following compilation errors after integration.\n` +
-          `These may be cross-domain import issues, missing type definitions,\n` +
-          `or interface contract mismatches. Fix them all.\n` +
-          `Rewrite ONLY the files that need changes.\n\n${errorReport}`,
+          `\n\n## ❌ CI PIPELINE FAILED — FIX ALL ISSUES\n` +
+          `The full CI pipeline (build + lint + tests) found issues after integration.\n` +
+          `These may be cross-domain import issues, missing types, lint violations,\n` +
+          `or test regressions. You must fix them ALL.\n` +
+          `Rewrite ONLY the files that need changes.\n\n${qualityReport}`,
         workspaceContext: state.workspaceContext,
         chatHistory: "",
-        userQuestion: `Fix the ${buildResult.errorCount} build error(s). Output corrected files using ### \`path\` format.`,
+        userQuestion: `Fix ALL CI pipeline failures. Output corrected files using ### \`path\` format.`,
         maxSystemChars: 20_000,
         maxWorkspaceChars: 6_000,
       });
@@ -244,8 +257,11 @@ export async function integratorNode(
       ...(writtenFiles.length > 0
         ? { integration_files: writtenFiles.join(", ") }
         : {}),
-      ...(buildResult ? { build_status: buildResult.success ? "passed" : `failed:${buildResult.errorCount}` } : {}),
-      ...(buildResult && !buildResult.success ? { build_errors: formatBuildErrorsForLLM(buildResult) } : {}),
+      ...(qaReport ? { build_status: qaReport.build.success ? "passed" : `failed:${qaReport.build.errorCount}` } : {}),
+      ...(qaReport ? { quality_summary: qaReport.summary } : {}),
+      ...(qaReport?.tests ? { test_results: qaReport.tests.success ? `passed:${qaReport.tests.passed}/${qaReport.tests.total}` : `failed:${qaReport.tests.failed}/${qaReport.tests.total}` } : {}),
+      ...(qaReport?.lint ? { lint_results: qaReport.lint.success ? "passed" : `errors:${qaReport.lint.errorCount}` } : {}),
+      ...(qaReport && !qaReport.passed ? { quality_errors: formatQualityReportForLLM(qaReport) } : {}),
     },
     terminalResults,
   };

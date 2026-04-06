@@ -30,11 +30,12 @@ import { logger } from "../utils/logger";
 import { applyCodeToWorkspace } from "../utils/fileWriter";
 import { runCommandsFromOutput } from "../utils/terminalRunner";
 import {
-  runBuildValidation,
-  formatBuildErrorsForLLM,
-  filterErrorsForFiles,
-  type BuildResult,
-} from "../utils/buildValidator";
+  runQualityGate,
+  formatQualityReportForLLM,
+  filterDiagnosticsForFiles,
+  type QualityGateResult,
+  type BuildDiagnostic,
+} from "../utils/qualityGate";
 
 // ── Prompts ──────────────────────────────────────────────────────────
 
@@ -123,6 +124,13 @@ CRITICAL RULES
 4. Write clean, production-quality, well-typed, well-documented code.
 5. Do NOT duplicate work that belongs to another domain.
 6. Include comprehensive JSDoc/docstrings at module and export boundaries.
+
+YOUR CODE WILL BE AUTOMATICALLY VALIDATED:
+  • Type checking (tsc --noEmit) — full project
+  • Lint (eslint) — your files
+  • Related tests (jest --findRelatedTests) — your files
+  Any failures will be sent back to you for fixing.
+  Write production-quality code that passes CI on the first attempt.
 
 ═══════════════════════════════════════
 FILE FORMAT (mandatory for workspace writes)
@@ -452,12 +460,12 @@ export async function coderPoolNode(
     postAgentMessage(state, `coder:${domain.id}`, "*", "info", cappedResponse);
   }
 
-  // ── 5. Build validation + targeted error-feedback retry ──
-  // After ALL domain coders have written their files, validate the build.
-  // If there are errors, identify which domain caused each error and let
-  // that domain's coder fix it. This is much more effective than one
-  // monolithic fix because each coder only sees ITS OWN mistakes.
-  let buildResult: BuildResult | null = null;
+  // ── 5. Quality Gate + targeted error-feedback retry ──
+  // After ALL domain coders have written their files, run the full quality
+  // gate (build + lint + tests). If there are errors, identify which domain
+  // caused each error and dispatch targeted fixes — each engineer only
+  // sees THEIR OWN mistakes, like a real CI pipeline.
+  let qaReport: QualityGateResult | null = null;
   const MAX_POOL_FIX_RETRIES = 2;
   const wsRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 
@@ -465,52 +473,65 @@ export async function coderPoolNode(
     for (let attempt = 0; attempt <= MAX_POOL_FIX_RETRIES; attempt++) {
       if (token.isCancellationRequested) { break; }
 
-      buildResult = await runBuildValidation(wsRoot);
+      qaReport = await runQualityGate(wsRoot, allWrittenFiles);
 
-      if (buildResult.success) {
-        stream.markdown(`\n> ✅ **Build validation passed** — all domain outputs compile cleanly.\n`);
+      if (qaReport.passed) {
+        stream.markdown(`\n> ✅ **Quality gate passed** — ${qaReport.summary}\n`);
         break;
       }
 
       if (attempt >= MAX_POOL_FIX_RETRIES) {
         stream.markdown(
-          `\n> ⚠️ **Build still failing** after ${MAX_POOL_FIX_RETRIES} fix round(s). ` +
-          `${buildResult.errorCount} error(s) remain. Passing to Integrator for resolution.\n`
+          `\n> ⚠️ **Quality gate still failing** after ${MAX_POOL_FIX_RETRIES} fix round(s). ` +
+          `${qaReport.summary}. Passing to Integrator for resolution.\n`
         );
         break;
       }
 
       stream.markdown(
-        `\n> 🔧 **Build failed** (${buildResult.errorCount} error(s)) — ` +
+        `\n> 🔧 **Quality gate failed** (${qaReport.summary}) — ` +
         `dispatching targeted fixes (round ${attempt + 1}/${MAX_POOL_FIX_RETRIES})…\n`
       );
 
       // ── Dispatch targeted fix calls per domain ──
+      // Build + lint errors have file paths → attribute to specific domains.
+      // Test failures are included in all fix prompts (hard to attribute).
+      const allDiagnostics: BuildDiagnostic[] = [
+        ...qaReport.build.diagnostics,
+        ...(qaReport.lint?.diagnostics ?? []),
+      ];
+      const testFailureSummary = qaReport.tests && !qaReport.tests.success
+        ? qaReport.tests.failures.map(f => `- **${f.suiteName} › ${f.testName}**: ${f.message.slice(0, 200)}`).join("\n")
+        : "";
+
       const fixPromises: Promise<DomainCoderResult>[] = [];
       for (const result of results) {
-        if (result.error || !buildResult) { continue; }
+        if (result.error) { continue; }
         const domFiles = domainWrittenFiles.get(result.domain.id) ?? [];
         if (domFiles.length === 0) { continue; }
 
-        const domainErrors = filterErrorsForFiles(buildResult, domFiles);
-        if (domainErrors.length === 0) { continue; } // This domain's code is fine
+        const domainErrors = filterDiagnosticsForFiles(allDiagnostics, domFiles);
+        if (domainErrors.length === 0 && !testFailureSummary) { continue; }
 
-        const errorReport = domainErrors.map(d =>
+        let errorReport = domainErrors.map(d =>
           `- **${d.file}:${d.line}** [${d.code}] ${d.message}`
         ).join("\n");
 
+        if (testFailureSummary) {
+          errorReport += `\n\n### Test Failures (may relate to your domain):\n${testFailureSummary}`;
+        }
+
+        const totalIssues = domainErrors.length + (testFailureSummary ? 1 : 0);
         stream.markdown(
-          `> 🔧 **${result.domain.domain}**: ${domainErrors.length} error(s) — sending back for fix\n`
+          `> 🔧 **${result.domain.domain}**: ${totalIssues} issue(s) — sending back for fix\n`
         );
 
-        // Create a targeted fix prompt for this domain
         const fixPrompt = buildDomainCoderPrompt(result.domain, domains) +
-          `\n\n## ❌ BUILD ERRORS IN YOUR FILES — FIX THESE NOW\n` +
-          `Your previous code produced these compilation errors:\n${errorReport}\n\n` +
+          `\n\n## ❌ QUALITY GATE FAILED — FIX YOUR FILES\n` +
+          `Your code failed the quality gate (build/lint/tests):\n${errorReport}\n\n` +
           `Rewrite ONLY the files that have errors. Include COMPLETE fixed file contents.\n` +
           `Do NOT re-output files that are already correct.`;
 
-        // Re-run this domain's coder with error context
         fixPromises.push(
           (async (): Promise<DomainCoderResult> => {
             const start = Date.now();
@@ -519,7 +540,7 @@ export async function coderPoolNode(
                 systemPrompt: fixPrompt,
                 workspaceContext: state.workspaceContext,
                 chatHistory: "",
-                userQuestion: `Fix the ${domainErrors.length} build error(s) in your files: ${domFiles.join(", ")}`,
+                userQuestion: `Fix the quality gate failures in your files: ${domFiles.join(", ")}`,
                 maxSystemChars: 14_000,
                 maxWorkspaceChars: 4_000,
               });
@@ -532,9 +553,7 @@ export async function coderPoolNode(
         );
       }
 
-      // Wait for all fix calls to complete
       if (fixPromises.length === 0) {
-        // No domain-specific errors found — might be cross-domain issues
         stream.markdown(`> ℹ️ Errors may be cross-domain — passing to Integrator.\n`);
         break;
       }
@@ -544,7 +563,6 @@ export async function coderPoolNode(
         const fixResult = s.status === "fulfilled" ? s.value : null;
         if (!fixResult || fixResult.error || !fixResult.response) { continue; }
 
-        // Apply the fix
         try {
           const writeResult = await applyCodeToWorkspace(fixResult.response, stream);
           if (writeResult.written.length > 0) {
@@ -564,9 +582,9 @@ export async function coderPoolNode(
   // ── 6. Summary ──
   const successCount = results.filter((r) => !r.error).length;
   const totalFiles = allWrittenFiles.length;
-  const buildStatus = buildResult
-    ? (buildResult.success ? "✅ build passed" : `⚠️ ${buildResult.errorCount} error(s)`)
-    : "⏭️ no build check";
+  const buildStatus = qaReport
+    ? (qaReport.passed ? `✅ QA passed` : `⚠️ ${qaReport.summary}`)
+    : "⏭️ no quality check";
 
   stream.markdown(
     `\n---\n\n` +
@@ -593,8 +611,11 @@ export async function coderPoolNode(
       ...(allWrittenFiles.length > 0
         ? { written_files: allWrittenFiles.join(", ") }
         : {}),
-      ...(buildResult ? { build_status: buildResult.success ? "passed" : `failed:${buildResult.errorCount}` } : {}),
-      ...(buildResult && !buildResult.success ? { build_errors: formatBuildErrorsForLLM(buildResult) } : {}),
+      ...(qaReport ? { build_status: qaReport.build.success ? "passed" : `failed:${qaReport.build.errorCount}` } : {}),
+      ...(qaReport ? { quality_summary: qaReport.summary } : {}),
+      ...(qaReport?.tests ? { test_results: qaReport.tests.success ? `passed:${qaReport.tests.passed}/${qaReport.tests.total}` : `failed:${qaReport.tests.failed}/${qaReport.tests.total}` } : {}),
+      ...(qaReport?.lint ? { lint_results: qaReport.lint.success ? "passed" : `errors:${qaReport.lint.errorCount}` } : {}),
+      ...(qaReport && !qaReport.passed ? { quality_errors: formatQualityReportForLLM(qaReport) } : {}),
     },
     domainAssignments: domains,
     terminalResults: allTerminalResults,

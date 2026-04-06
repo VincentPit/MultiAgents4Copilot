@@ -12,7 +12,12 @@ import { callModel, buildMessages, capContext } from "./base";
 import { logger } from "../utils/logger";
 import { applyCodeToWorkspace } from "../utils/fileWriter";
 import { runCommandsFromOutput, type CommandResult } from "../utils/terminalRunner";
-import { runBuildValidation, formatBuildErrorsForLLM, type BuildResult } from "../utils/buildValidator";
+import {
+  runQualityGate,
+  formatQualityReportForLLM,
+  generateDiffReport,
+  type QualityGateResult,
+} from "../utils/qualityGate";
 import type { TerminalResult } from "../graph/state";
 
 const SYSTEM_PROMPT = `You are the Coder agent — an expert software engineer who writes real files.
@@ -51,6 +56,24 @@ src/types/, src/extension.ts, package.json, tsconfig.json, jest.config.js,
 or any file in the extension's own project). You are that extension —
 modifying your own source code causes corruption. If asked to work on "this"
 extension, explain that self-modification is blocked for safety.`;
+
+const SELF_REVIEW_PROMPT = `You are reviewing your own code before submitting it for peer review.
+This is your pre-submit self-review — like reviewing your PR diff before requesting reviewers.
+
+SELF-REVIEW CHECKLIST (apply to the diff below):
+□ No unused imports or variables
+□ All error handling in place (try/catch for async, null checks)
+□ No hardcoded secrets, passwords, or API keys
+□ No console.log or debug statements left in production code
+□ Type safety — no unnecessary \`any\` types
+□ Consistent naming (camelCase for vars, PascalCase for types)
+□ No code duplication — extract shared logic
+□ JSDoc/comments for non-obvious logic
+□ Edge cases handled (empty arrays, null inputs, etc.)
+□ No off-by-one errors in loops or slices
+
+If you find issues, output the corrected files using ### \`path\` format.
+If the code looks good, respond with exactly: "LGTM — no issues found."`;
 
 export async function coderNode(
   state: AgentState,
@@ -114,51 +137,50 @@ export async function coderNode(
     stream.markdown(`\n> ⚠️ Failed to apply code changes: ${errMsg}\n`);
   }
 
-  // ── Build validation + error-feedback retry loop ────────────────────
-  // After writing files, validate the build. If errors are found, feed
-  // them back to the LLM so it can self-correct. Max 2 retries.
+  // ── Quality Gate: build → lint → test → self-review ─────────────────
+  // Like a real engineer's pre-submit pipeline: code must pass ALL
+  // automated checks before it goes to peer review.
   const MAX_FIX_RETRIES = 2;
-  let buildResult: BuildResult | null = null;
+  let qaReport: QualityGateResult | null = null;
   let lastResponse = response;
 
   if (writtenFiles.length > 0) {
     const wsRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     if (wsRoot) {
+      // Phase 1: Quality Gate (build + lint + tests)
       for (let attempt = 0; attempt <= MAX_FIX_RETRIES; attempt++) {
         if (token.isCancellationRequested) { break; }
 
-        buildResult = await runBuildValidation(wsRoot);
+        qaReport = await runQualityGate(wsRoot, writtenFiles);
 
-        if (buildResult.success) {
-          stream.markdown(`\n> ✅ **Build validation passed** — no compilation errors.\n`);
+        if (qaReport.passed) {
+          stream.markdown(`\n> ✅ **Quality gate passed** — ${qaReport.summary}\n`);
           break;
         }
 
         if (attempt >= MAX_FIX_RETRIES) {
           stream.markdown(
-            `\n> ⚠️ **Build still failing** after ${MAX_FIX_RETRIES} fix attempt(s). ` +
-            `${buildResult.errorCount} error(s) remain. Proceeding anyway.\n`
+            `\n> ⚠️ **Quality gate still failing** after ${MAX_FIX_RETRIES} fix attempt(s). ` +
+            `${qaReport.summary}. Proceeding anyway.\n`
           );
           break;
         }
 
-        // ── Feed errors back to the LLM for self-correction ──
-        const errorReport = formatBuildErrorsForLLM(buildResult);
+        const qualityReport = formatQualityReportForLLM(qaReport);
         stream.markdown(
-          `\n> 🔧 **Build failed** (${buildResult.errorCount} error(s)) — ` +
+          `\n> 🔧 **Quality gate failed** (${qaReport.summary}) — ` +
           `asking coder to fix (attempt ${attempt + 1}/${MAX_FIX_RETRIES})…\n`
         );
 
         const fixMessages = buildMessages({
-          systemPrompt: SYSTEM_PROMPT + `\n\n## BUILD ERRORS — FIX THESE NOW\n` +
-            `Your previous code produced the following compilation errors.\n` +
-            `Rewrite ONLY the files that have errors. Include the COMPLETE fixed file contents.\n` +
-            `Do NOT re-output files that are already correct.\n\n` + errorReport,
+          systemPrompt: SYSTEM_PROMPT + `\n\n## ❌ QUALITY GATE FAILED — FIX THESE ISSUES\n` +
+            `Your code failed the automated quality gate (build, lint, and/or tests).\n` +
+            `Fix ALL issues below. Rewrite ONLY the files that have errors.\n` +
+            `Include the COMPLETE fixed file contents.\n\n` + qualityReport,
           workspaceContext: state.workspaceContext,
           references: state.references,
           chatHistory: "",
-          userQuestion: `Fix the ${buildResult.errorCount} build error(s) shown above. ` +
-            `Output only the corrected files using ### \`path\` format.`,
+          userQuestion: `Fix ALL quality gate failures. Output only corrected files using ### \`path\` format.`,
           maxSystemChars: 16_000,
           maxWorkspaceChars: 6_000,
           maxReferencesChars: 6_000,
@@ -175,6 +197,47 @@ export async function coderNode(
           }
         } catch (err: any) {
           logger.error("coder", `Fix attempt ${attempt + 1} file write failed: ${err?.message}`);
+        }
+      }
+
+      // Phase 2: Self-Review (like reviewing your own PR before requesting reviewers)
+      if (qaReport?.passed && !token.isCancellationRequested) {
+        const diff = qaReport.diff || await generateDiffReport(wsRoot, writtenFiles);
+        if (diff && diff.trim().length > 50) {
+          stream.markdown(`\n> 🔍 **Self-reviewing** changes before peer review…\n`);
+
+          const reviewMessages = buildMessages({
+            systemPrompt: SELF_REVIEW_PROMPT +
+              `\n\n## Your Changes (diff)\n\`\`\`diff\n${diff.slice(0, 8000)}\n\`\`\``,
+            workspaceContext: state.workspaceContext,
+            chatHistory: "",
+            userQuestion: "Review the diff of your changes above. If you find issues, " +
+              "output corrected files using ### `path` format. If code looks good, say LGTM.",
+            maxSystemChars: 14_000,
+            maxWorkspaceChars: 4_000,
+          });
+
+          const reviewResp = await callModel(model, reviewMessages, stream, token, "coder-self-review");
+
+          if (!reviewResp.toUpperCase().includes("LGTM")) {
+            try {
+              const fixResult = await applyCodeToWorkspace(reviewResp, stream);
+              if (fixResult.written.length > 0) {
+                writtenFiles.push(...fixResult.written);
+                lastResponse = reviewResp;
+                logger.info("coder", `Self-review: fixed ${fixResult.written.length} file(s)`);
+                // Quick re-validation after self-review fixes
+                qaReport = await runQualityGate(wsRoot, writtenFiles);
+                if (qaReport.passed) {
+                  stream.markdown(`\n> ✅ **Post-review quality gate passed**\n`);
+                }
+              }
+            } catch (err: any) {
+              logger.error("coder", `Self-review fix write failed: ${err?.message}`);
+            }
+          } else {
+            stream.markdown(`\n> ✅ **Self-review: LGTM** — code looks clean.\n`);
+          }
         }
       }
     }
@@ -218,8 +281,11 @@ export async function coderNode(
       last_code: lastResponse,
       ...(writtenFiles.length > 0 ? { written_files: writtenFiles.join(", ") } : {}),
       ...(terminalResults.length > 0 ? { terminal_output: terminalResults.map(r => `$ ${r.command} → ${r.success ? "OK" : "FAIL"}`).join("\n") } : {}),
-      ...(buildResult ? { build_status: buildResult.success ? "passed" : `failed:${buildResult.errorCount}` } : {}),
-      ...(buildResult && !buildResult.success ? { build_errors: formatBuildErrorsForLLM(buildResult) } : {}),
+      ...(qaReport ? { build_status: qaReport.build.success ? "passed" : `failed:${qaReport.build.errorCount}` } : {}),
+      ...(qaReport ? { quality_summary: qaReport.summary } : {}),
+      ...(qaReport?.tests ? { test_results: qaReport.tests.success ? `passed:${qaReport.tests.passed}/${qaReport.tests.total}` : `failed:${qaReport.tests.failed}/${qaReport.tests.total}` } : {}),
+      ...(qaReport?.lint ? { lint_results: qaReport.lint.success ? "passed" : `errors:${qaReport.lint.errorCount}` } : {}),
+      ...(qaReport && !qaReport.passed ? { quality_errors: formatQualityReportForLLM(qaReport) } : {}),
     },
     terminalResults,
   };

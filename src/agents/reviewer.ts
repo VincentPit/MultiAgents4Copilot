@@ -38,8 +38,23 @@ export async function reviewerNode(
   const code = capContext(state.artifacts["last_code"] ?? "No code produced yet.", 12_000);
   const lastUserMsg = [...state.messages].reverse().find(m => m.role === "user")?.content ?? "";
 
+  // Build CI context from artifacts (like seeing CI results on a PR page)
+  let ciContext = "";
+  const qSummary = state.artifacts["quality_summary"] ?? "";
+  const buildStatus = state.artifacts["build_status"] ?? "";
+  const testResults = state.artifacts["test_results"] ?? "";
+  const lintResults = state.artifacts["lint_results"] ?? "";
+
+  if (qSummary || buildStatus || testResults || lintResults) {
+    ciContext = "\n\n## CI Pipeline Status";
+    if (qSummary) { ciContext += `\nOverall: ${qSummary}`; }
+    if (buildStatus) { ciContext += `\nBuild: ${buildStatus}`; }
+    if (lintResults) { ciContext += `\nLint: ${lintResults}`; }
+    if (testResults) { ciContext += `\nTests: ${testResults}`; }
+  }
+
   // Build system prompt with code to review embedded
-  const sysPrompt = SYSTEM_PROMPT + `\n\n## Code to Review\n\`\`\`\n${code}\n\`\`\``;
+  const sysPrompt = SYSTEM_PROMPT + ciContext + `\n\n## Code to Review\n\`\`\`\n${code}\n\`\`\``;
 
   const messages = buildMessages({
     systemPrompt: sysPrompt,

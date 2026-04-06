@@ -15,15 +15,20 @@ import { createInitialState, type AgentState } from "../../graph/state";
 
 // ── Mock setup ──────────────────────────────────────────────────────
 
-// Mock buildValidator module — we control when build passes/fails
-const mockRunBuildValidation = jest.fn();
-const mockFormatBuildErrorsForLLM = jest.fn();
-const mockFilterErrorsForFiles = jest.fn();
+// Mock qualityGate module — we control when quality checks pass/fail
+const mockRunQualityGate = jest.fn();
+const mockRunFullQualityGate = jest.fn();
+const mockFormatQualityReportForLLM = jest.fn();
+const mockFilterDiagnosticsForFiles = jest.fn();
+const mockGenerateDiffReport = jest.fn();
 
-jest.mock("../../utils/buildValidator", () => ({
-  runBuildValidation: (...args: any[]) => mockRunBuildValidation(...args),
-  formatBuildErrorsForLLM: (...args: any[]) => mockFormatBuildErrorsForLLM(...args),
-  filterErrorsForFiles: (...args: any[]) => mockFilterErrorsForFiles(...args),
+jest.mock("../../utils/qualityGate", () => ({
+  runQualityGate: (...args: any[]) => mockRunQualityGate(...args),
+  runFullQualityGate: (...args: any[]) => mockRunFullQualityGate(...args),
+  formatQualityReportForLLM: (...args: any[]) => mockFormatQualityReportForLLM(...args),
+  formatBuildErrorsForLLM: jest.fn().mockReturnValue("✅ Build passed"),
+  filterDiagnosticsForFiles: (...args: any[]) => mockFilterDiagnosticsForFiles(...args),
+  generateDiffReport: (...args: any[]) => mockGenerateDiffReport(...args),
 }));
 
 // Shared mock functions for base agent helpers — used by ALL agent tests
@@ -109,11 +114,33 @@ function failedBuildResult(errorCount = 2) {
   };
 }
 
+function successQAResult(): any {
+  return {
+    build: successBuildResult(),
+    lint: { success: true, errorCount: 0, warningCount: 0, diagnostics: [], stdout: "", stderr: "", command: "(none)", durationMs: 0 },
+    tests: { success: true, passed: 0, failed: 0, total: 0, skipped: 0, failures: [], stdout: "", stderr: "", command: "(none)", durationMs: 0 },
+    diff: "",
+    passed: true,
+    summary: "Build: ✅ | Lint: ✅ | Tests: ⏭️ (none found)",
+  };
+}
+
+function failedQAResult(errorCount = 2): any {
+  return {
+    build: failedBuildResult(errorCount),
+    lint: { success: true, errorCount: 0, warningCount: 0, diagnostics: [], stdout: "", stderr: "", command: "(none)", durationMs: 0 },
+    tests: null,
+    diff: "",
+    passed: false,
+    summary: `Build: ❌ (${errorCount} errors) | Lint: ✅ | Tests: ⏭️ (none found)`,
+  };
+}
+
 // ═══════════════════════════════════════════════════════════════════════
-// Coder — build validation + retry loop
+// Coder — quality gate retry loop
 // ═══════════════════════════════════════════════════════════════════════
 
-describe("coderNode — build validation retry loop", () => {
+describe("coderNode — quality gate retry loop", () => {
   let coderNode: typeof import("../../agents/coder").coderNode;
 
   beforeAll(() => {
@@ -122,42 +149,41 @@ describe("coderNode — build validation retry loop", () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    // Default: model produces code, file writer succeeds
     mockCallModel.mockResolvedValue("### `src/foo.ts`\n```typescript\nconst x = 1;\n```");
     mockApplyCodeToWorkspace.mockResolvedValue({ written: ["src/foo.ts"], skipped: [] });
-    mockFormatBuildErrorsForLLM.mockReturnValue("❌ Build FAILED with 2 error(s)");
+    mockFormatQualityReportForLLM.mockReturnValue("❌ Quality gate FAILED");
+    mockGenerateDiffReport.mockResolvedValue(""); // No diff → skip self-review
     mockBuildMessages.mockReturnValue([
       vscode.LanguageModelChatMessage.User("mock message"),
     ]);
   });
 
-  it("stores build_status=passed in artifacts when build succeeds", async () => {
-    mockRunBuildValidation.mockResolvedValue(successBuildResult());
+  it("stores build_status=passed when quality gate passes", async () => {
+    mockRunQualityGate.mockResolvedValue(successQAResult());
 
     const state = createInitialState("write code");
     const result = await coderNode(state, mockModel, mockStream(), mockToken());
 
     expect(result.artifacts).toBeDefined();
     expect(result.artifacts!["build_status"]).toBe("passed");
-    expect(result.artifacts!["build_errors"]).toBeUndefined();
+    expect(result.artifacts!["quality_summary"]).toBeDefined();
+    expect(result.artifacts!["quality_errors"]).toBeUndefined();
   });
 
-  it("runs build validation after writing files", async () => {
-    mockRunBuildValidation.mockResolvedValue(successBuildResult());
+  it("runs quality gate after writing files", async () => {
+    mockRunQualityGate.mockResolvedValue(successQAResult());
 
     const state = createInitialState("write code");
     await coderNode(state, mockModel, mockStream(), mockToken());
 
-    expect(mockRunBuildValidation).toHaveBeenCalledTimes(1);
+    expect(mockRunQualityGate).toHaveBeenCalledTimes(1);
   });
 
-  it("retries on build failure and calls model again with error context", async () => {
-    // First build fails, second succeeds
-    mockRunBuildValidation
-      .mockResolvedValueOnce(failedBuildResult(2))
-      .mockResolvedValueOnce(successBuildResult());
+  it("retries on quality gate failure and calls model with error context", async () => {
+    mockRunQualityGate
+      .mockResolvedValueOnce(failedQAResult(2))
+      .mockResolvedValueOnce(successQAResult());
 
-    // First call: original code. Second call: fix response
     mockCallModel
       .mockResolvedValueOnce("### `src/foo.ts`\n```typescript\nconst x = 1;\n```")
       .mockResolvedValueOnce("### `src/foo.ts`\n```typescript\nconst x: number = 1;\n```");
@@ -168,19 +194,15 @@ describe("coderNode — build validation retry loop", () => {
     const stream = mockStream();
     await coderNode(state, mockModel, stream, mockToken());
 
-    // Should have called model twice: initial + 1 fix attempt
     expect(mockCallModel).toHaveBeenCalledTimes(2);
-    // Should have called build validation twice: initial check + after fix
-    expect(mockRunBuildValidation).toHaveBeenCalledTimes(2);
+    expect(mockRunQualityGate).toHaveBeenCalledTimes(2);
 
-    // Should show fix attempt in stream
     const markdownCalls = (stream.markdown as jest.Mock).mock.calls.map((c: any[]) => c[0]);
-    expect(markdownCalls.some((m: string) => m.includes("Build failed") || m.includes("🔧"))).toBe(true);
+    expect(markdownCalls.some((m: string) => m.includes("Quality gate failed") || m.includes("🔧"))).toBe(true);
   });
 
-  it("stores build_status=failed and build_errors when max retries exhausted", async () => {
-    // Build always fails
-    mockRunBuildValidation.mockResolvedValue(failedBuildResult(3));
+  it("stores quality_errors when max retries exhausted", async () => {
+    mockRunQualityGate.mockResolvedValue(failedQAResult(3));
     mockCallModel.mockResolvedValue("### `src/foo.ts`\n```typescript\nbroken;\n```");
     mockApplyCodeToWorkspace.mockResolvedValue({ written: ["src/foo.ts"], skipped: [] });
 
@@ -188,47 +210,44 @@ describe("coderNode — build validation retry loop", () => {
     const result = await coderNode(state, mockModel, mockStream(), mockToken());
 
     expect(result.artifacts!["build_status"]).toContain("failed");
-    expect(result.artifacts!["build_errors"]).toBeDefined();
+    expect(result.artifacts!["quality_errors"]).toBeDefined();
   });
 
-  it("does not run build validation when no files are written", async () => {
+  it("does not run quality gate when no files are written", async () => {
     mockApplyCodeToWorkspace.mockResolvedValue({ written: [], skipped: [] });
 
     const state = createInitialState("write code");
     await coderNode(state, mockModel, mockStream(), mockToken());
 
-    expect(mockRunBuildValidation).not.toHaveBeenCalled();
+    expect(mockRunQualityGate).not.toHaveBeenCalled();
   });
 
   it("stops retry loop on cancellation", async () => {
-    mockRunBuildValidation.mockResolvedValue(failedBuildResult(2));
+    mockRunQualityGate.mockResolvedValue(failedQAResult(2));
 
     const state = createInitialState("write code");
     const cancelledToken = mockToken(true);
     await coderNode(state, mockModel, mockStream(), cancelledToken);
 
-    // Should have called model 1 time (initial) but build validation
-    // should break early due to cancellation
     expect(mockCallModel).toHaveBeenCalledTimes(1);
   });
 
-  it("includes error report in fix prompt system message", async () => {
-    mockRunBuildValidation
-      .mockResolvedValueOnce(failedBuildResult(1))
-      .mockResolvedValueOnce(successBuildResult());
+  it("includes quality report in fix prompt system message", async () => {
+    mockRunQualityGate
+      .mockResolvedValueOnce(failedQAResult(1))
+      .mockResolvedValueOnce(successQAResult());
 
     mockCallModel.mockResolvedValue("### `src/foo.ts`\n```typescript\nfixed;\n```");
     mockApplyCodeToWorkspace.mockResolvedValue({ written: ["src/foo.ts"], skipped: [] });
-    mockFormatBuildErrorsForLLM.mockReturnValue("❌ Build FAILED with 1 error(s):\n- src/file0.ts:1 [TS2300]");
+    mockFormatQualityReportForLLM.mockReturnValue("❌ Quality gate FAILED:\n- src/file0.ts:1 [TS2300]");
 
     const state = createInitialState("write code");
     await coderNode(state, mockModel, mockStream(), mockToken());
 
-    // buildMessages should have been called with error context in second call
     expect(mockBuildMessages).toHaveBeenCalledTimes(2);
     const secondCallArgs = mockBuildMessages.mock.calls[1][0];
-    expect(secondCallArgs.systemPrompt).toContain("BUILD ERRORS");
-    expect(secondCallArgs.systemPrompt).toContain("FIX THESE NOW");
+    expect(secondCallArgs.systemPrompt).toContain("QUALITY GATE FAILED");
+    expect(secondCallArgs.systemPrompt).toContain("FIX THESE ISSUES");
   });
 });
 
@@ -236,7 +255,7 @@ describe("coderNode — build validation retry loop", () => {
 // Integrator — build awareness + fix loop
 // ═══════════════════════════════════════════════════════════════════════
 
-describe("integratorNode — build awareness + fix loop", () => {
+describe("integratorNode — CI pipeline + fix loop", () => {
   let integratorNode: typeof import("../../agents/integrator").integratorNode;
 
   beforeAll(() => {
@@ -247,14 +266,14 @@ describe("integratorNode — build awareness + fix loop", () => {
     jest.clearAllMocks();
     mockCallModel.mockResolvedValue("## Integration Report\n✅ All contracts validated");
     mockApplyCodeToWorkspace.mockResolvedValue({ written: [], skipped: [] });
-    mockFormatBuildErrorsForLLM.mockReturnValue("❌ Build FAILED");
+    mockFormatQualityReportForLLM.mockReturnValue("❌ CI pipeline FAILED");
     mockBuildMessages.mockReturnValue([
       vscode.LanguageModelChatMessage.User("mock message"),
     ]);
   });
 
-  it("injects prior build_errors into system prompt", async () => {
-    mockRunBuildValidation.mockResolvedValue(successBuildResult());
+  it("injects prior quality_errors into system prompt", async () => {
+    mockRunFullQualityGate.mockResolvedValue(successQAResult());
 
     const state = createInitialState("integrate code");
     state.domainAssignments = [
@@ -262,20 +281,19 @@ describe("integratorNode — build awareness + fix loop", () => {
     ];
     state.artifacts = {
       "domain_code:api": "some code",
-      build_errors: "❌ Build FAILED with 3 error(s) in src/api/routes.ts",
+      quality_errors: "❌ Quality gate FAILED with 3 error(s) in src/api/routes.ts",
     };
 
     await integratorNode(state, mockModel, mockStream(), mockToken());
 
-    // Check that buildMessages was called with the prior errors
     expect(mockBuildMessages).toHaveBeenCalled();
     const sysPrompt = mockBuildMessages.mock.calls[0]?.[0]?.systemPrompt ?? "";
-    expect(sysPrompt).toContain("EXISTING BUILD ERRORS FROM CODERS");
+    expect(sysPrompt).toContain("EXISTING QUALITY ISSUES FROM CODERS");
     expect(sysPrompt).toContain("3 error(s)");
   });
 
-  it("runs build validation after writing integration files", async () => {
-    mockRunBuildValidation.mockResolvedValue(successBuildResult());
+  it("runs full quality gate after writing integration files", async () => {
+    mockRunFullQualityGate.mockResolvedValue(successQAResult());
     mockApplyCodeToWorkspace.mockResolvedValue({ written: ["src/index.ts"], skipped: [] });
 
     const state = createInitialState("integrate");
@@ -284,11 +302,11 @@ describe("integratorNode — build awareness + fix loop", () => {
 
     await integratorNode(state, mockModel, mockStream(), mockToken());
 
-    expect(mockRunBuildValidation).toHaveBeenCalled();
+    expect(mockRunFullQualityGate).toHaveBeenCalled();
   });
 
   it("stores build_status=passed on success", async () => {
-    mockRunBuildValidation.mockResolvedValue(successBuildResult());
+    mockRunFullQualityGate.mockResolvedValue(successQAResult());
 
     const state = createInitialState("integrate");
     state.domainAssignments = [];
@@ -299,10 +317,10 @@ describe("integratorNode — build awareness + fix loop", () => {
     expect(result.artifacts!["build_status"]).toBe("passed");
   });
 
-  it("retries fix when integration build fails", async () => {
-    mockRunBuildValidation
-      .mockResolvedValueOnce(failedBuildResult(1))
-      .mockResolvedValueOnce(successBuildResult());
+  it("retries fix when CI pipeline fails", async () => {
+    mockRunFullQualityGate
+      .mockResolvedValueOnce(failedQAResult(1))
+      .mockResolvedValueOnce(successQAResult());
 
     mockCallModel
       .mockResolvedValueOnce("## Integration\n### `src/index.ts`\n```typescript\nexport {};\n```")
@@ -316,13 +334,12 @@ describe("integratorNode — build awareness + fix loop", () => {
 
     await integratorNode(state, mockModel, mockStream(), mockToken());
 
-    // Should have called model 2 times (initial + fix)
     expect(mockCallModel).toHaveBeenCalledTimes(2);
-    expect(mockRunBuildValidation).toHaveBeenCalledTimes(2);
+    expect(mockRunFullQualityGate).toHaveBeenCalledTimes(2);
   });
 
-  it("stores build_errors when max retries exhausted", async () => {
-    mockRunBuildValidation.mockResolvedValue(failedBuildResult(5));
+  it("stores quality_errors when max retries exhausted", async () => {
+    mockRunFullQualityGate.mockResolvedValue(failedQAResult(5));
     mockCallModel.mockResolvedValue("### `src/broken.ts`\n```typescript\nbroken;\n```");
     mockApplyCodeToWorkspace.mockResolvedValue({ written: ["src/broken.ts"], skipped: [] });
 
@@ -333,7 +350,7 @@ describe("integratorNode — build awareness + fix loop", () => {
     const result = await integratorNode(state, mockModel, mockStream(), mockToken());
 
     expect(result.artifacts!["build_status"]).toContain("failed");
-    expect(result.artifacts!["build_errors"]).toBeDefined();
+    expect(result.artifacts!["quality_errors"]).toBeDefined();
   });
 });
 
@@ -399,7 +416,7 @@ describe("supervisorNode — build state awareness", () => {
 // CoderPool — per-domain targeted error fix
 // ═══════════════════════════════════════════════════════════════════════
 
-describe("coderPoolNode — per-domain targeted error fix", () => {
+describe("coderPoolNode — per-domain quality gate fix", () => {
   let coderPoolNode: typeof import("../../agents/coderPool").coderPoolNode;
 
   beforeAll(() => {
@@ -412,14 +429,14 @@ describe("coderPoolNode — per-domain targeted error fix", () => {
       '```json\n[{"id":"api","domain":"API","description":"REST","filePatterns":["src/api/**"],"provides":"Router","consumes":"DB"},{"id":"db","domain":"Data","description":"Database","filePatterns":["src/db/**"],"provides":"DB","consumes":""}]\n```'
     );
     mockApplyCodeToWorkspace.mockResolvedValue({ written: ["src/api/routes.ts"], skipped: [] });
-    mockFormatBuildErrorsForLLM.mockReturnValue("❌ Build FAILED");
-    mockFilterErrorsForFiles.mockReturnValue([]);
+    mockFormatQualityReportForLLM.mockReturnValue("❌ Quality gate FAILED");
+    mockFilterDiagnosticsForFiles.mockReturnValue([]);
     mockBuildMessages.mockReturnValue([
       vscode.LanguageModelChatMessage.User("mock message"),
     ]);
   });
 
-  it("stores build_status in artifacts after successful build", async () => {
+  it("stores build_status in artifacts after successful quality gate", async () => {
     mockCallModel
       .mockResolvedValueOnce(
         '```json\n[{"id":"full","domain":"Full","description":"All","filePatterns":["src/**"],"provides":"","consumes":""}]\n```'
@@ -427,7 +444,7 @@ describe("coderPoolNode — per-domain targeted error fix", () => {
       .mockResolvedValueOnce("### `src/app.ts`\n```typescript\nconst app = 1;\n```");
 
     mockApplyCodeToWorkspace.mockResolvedValue({ written: ["src/app.ts"], skipped: [] });
-    mockRunBuildValidation.mockResolvedValue(successBuildResult());
+    mockRunQualityGate.mockResolvedValue(successQAResult());
 
     const state = createInitialState("build something");
     const result = await coderPoolNode(state, mockModel, mockStream(), mockToken());
@@ -436,7 +453,7 @@ describe("coderPoolNode — per-domain targeted error fix", () => {
     expect(result.artifacts!["build_status"]).toBe("passed");
   });
 
-  it("stores build_errors when build fails after max retries", async () => {
+  it("stores quality_errors when quality gate fails after max retries", async () => {
     mockCallModel
       .mockResolvedValueOnce(
         '```json\n[{"id":"api","domain":"API","description":"Routes","filePatterns":["src/api/**"],"provides":"Router","consumes":""}]\n```'
@@ -445,8 +462,8 @@ describe("coderPoolNode — per-domain targeted error fix", () => {
       .mockResolvedValue("### `src/api/routes.ts`\n```typescript\nstill broken;\n```");
 
     mockApplyCodeToWorkspace.mockResolvedValue({ written: ["src/api/routes.ts"], skipped: [] });
-    mockRunBuildValidation.mockResolvedValue(failedBuildResult(2));
-    mockFilterErrorsForFiles.mockReturnValue([
+    mockRunQualityGate.mockResolvedValue(failedQAResult(2));
+    mockFilterDiagnosticsForFiles.mockReturnValue([
       { file: "src/api/routes.ts", line: 1, column: 1, code: "TS2304", message: "err" },
     ]);
 
@@ -454,7 +471,7 @@ describe("coderPoolNode — per-domain targeted error fix", () => {
     const result = await coderPoolNode(state, mockModel, mockStream(), mockToken());
 
     expect(result.artifacts!["build_status"]).toContain("failed");
-    expect(result.artifacts!["build_errors"]).toBeDefined();
+    expect(result.artifacts!["quality_errors"]).toBeDefined();
   });
 
   it("dispatches targeted fix calls only to domains with errors", async () => {
@@ -471,11 +488,11 @@ describe("coderPoolNode — per-domain targeted error fix", () => {
       .mockResolvedValueOnce({ written: ["src/db/models.ts"], skipped: [] })
       .mockResolvedValueOnce({ written: ["src/api/routes.ts"], skipped: [] });
 
-    mockRunBuildValidation
-      .mockResolvedValueOnce(failedBuildResult(1))
-      .mockResolvedValueOnce(successBuildResult());
+    mockRunQualityGate
+      .mockResolvedValueOnce(failedQAResult(1))
+      .mockResolvedValueOnce(successQAResult());
 
-    mockFilterErrorsForFiles.mockImplementation((_result: any, files: string[]) => {
+    mockFilterDiagnosticsForFiles.mockImplementation((_diagnostics: any, files: string[]) => {
       if (files.includes("src/api/routes.ts")) {
         return [{ file: "src/api/routes.ts", line: 1, column: 1, code: "TS2304", message: "broken" }];
       }
@@ -486,11 +503,11 @@ describe("coderPoolNode — per-domain targeted error fix", () => {
     const stream = mockStream();
     await coderPoolNode(state, mockModel, stream, mockToken());
 
-    expect(mockFilterErrorsForFiles).toHaveBeenCalled();
+    expect(mockFilterDiagnosticsForFiles).toHaveBeenCalled();
 
     const markdownCalls = (stream.markdown as jest.Mock).mock.calls.map((c: any[]) => c[0]);
     const hasFixMessage = markdownCalls.some((m: string) =>
-      m.includes("Build failed") || m.includes("🔧") || m.includes("error")
+      m.includes("Quality gate failed") || m.includes("🔧") || m.includes("error")
     );
     expect(hasFixMessage).toBe(true);
   });
@@ -503,8 +520,8 @@ describe("coderPoolNode — per-domain targeted error fix", () => {
       .mockResolvedValueOnce("### `src/api/routes.ts`\n```typescript\ncode;\n```");
 
     mockApplyCodeToWorkspace.mockResolvedValue({ written: ["src/api/routes.ts"], skipped: [] });
-    mockRunBuildValidation.mockResolvedValue(failedBuildResult(1));
-    mockFilterErrorsForFiles.mockReturnValue([]);
+    mockRunQualityGate.mockResolvedValue(failedQAResult(1));
+    mockFilterDiagnosticsForFiles.mockReturnValue([]);
 
     const state = createInitialState("build");
     const stream = mockStream();

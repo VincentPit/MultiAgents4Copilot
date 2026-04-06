@@ -82,11 +82,15 @@ export async function supervisorNode(
     (failedAgentNames.length > 0
       ? `FAILED AGENTS (do NOT route to these): ${failedAgentNames.join(", ")}\n`
       : "") +
-    // ── Inject build state so the supervisor knows if code is broken ──
-    (state.artifacts["build_status"]
+    // ── Inject quality gate state so supervisor knows if code is broken ──
+    (state.artifacts["quality_summary"]
+      ? `Quality gate: ${state.artifacts["quality_summary"]}\n`
+      : state.artifacts["build_status"]
       ? `Build status: ${state.artifacts["build_status"]}\n`
       : "") +
-    (state.artifacts["build_errors"]
+    (state.artifacts["quality_errors"]
+      ? `⚠️ QUALITY GATE FAILED — code needs fixing before review.\n`
+      : state.artifacts["build_errors"]
       ? `⚠️ BUILD HAS ERRORS — code needs fixing before review.\n`
       : "") +
     `Last output: ${lastSnippet}\n` +
