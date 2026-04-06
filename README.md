@@ -1,11 +1,12 @@
 # 🤖 Multi-Agent Copilot
 
-A **graph-based multi-agent system** that runs inside the VS Code Copilot chat panel. Seven specialised AI agents — orchestrated by a supervisor through a lightweight state-machine — collaborate to plan, code, design, test, research, and review your work, all from a single `@team` command.
+A **graph-based multi-agent system** that runs inside the VS Code Copilot chat panel. Specialised AI agents — orchestrated by a supervisor through a DAG state-machine — collaborate to plan, code, design, test, research, and review your work, all from a single `@team` command. Each agent operates like a **Meta engineer**: running build → lint → test → diff quality gates, self-reviewing their own changes, and only submitting code that passes a full CI pipeline.
 
-![VS Code](https://img.shields.io/badge/VS%20Code-^1.93.0-007ACC?logo=visualstudiocode)
-![TypeScript](https://img.shields.io/badge/TypeScript-5.5+-3178C6?logo=typescript&logoColor=white)
+![VS Code](https://img.shields.io/badge/VS%20Code-^1.99.0-007ACC?logo=visualstudiocode)
+![TypeScript](https://img.shields.io/badge/TypeScript-5.9+-3178C6?logo=typescript&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
-![Agents](https://img.shields.io/badge/Agents-7-blueviolet)
+![Agents](https://img.shields.io/badge/Agents-9-blueviolet)
+![Tests](https://img.shields.io/badge/Tests-401_passing-brightgreen)
 
 ---
 
@@ -13,13 +14,19 @@ A **graph-based multi-agent system** that runs inside the VS Code Copilot chat p
 
 | Feature | Description |
 |---------|-------------|
-| **7 Specialist Agents** | Supervisor, Planner, Coder, Researcher, UI Designer, Test Generator, Reviewer |
+| **9 Specialist Agents** | Supervisor, Planner, Coder, Coder Pool (parallel), Integrator, Researcher, UI Designer, Test Generator, Reviewer |
+| **Meta-Style Quality Gates** | Every agent runs `build → lint → tests → diff` before marking code complete — like `arc diff` |
+| **Self-Review** | Coders review their own diffs (LLM checks for LGTM) before submitting — catches mistakes before review |
+| **Parallel Domain Coders** | Large tasks fan out to independent domain coders that work simultaneously, each with their own quality gate |
+| **Full CI Pipeline** | The Integrator (staff engineer) merges all domains and runs `runFullQualityGate` on the whole project |
+| **CI-Aware Code Review** | Reviewer sees build/lint/test status badges — CI failures are blocking issues |
 | **Multi-Model** | Claude Opus 4.6 (default) + Gemini 3 Pro (UI design) with automatic fallback |
 | **Inter-Agent Communication** | Shared message bus — agents post context for each other |
 | **GitHub Repo Search** | Researcher searches GitHub for professional reference repos matching your idea |
-| **Graph Orchestration** | Lightweight state-machine executor with conditional routing |
+| **DAG Graph Orchestration** | State-machine executor with conditional routing, parallel fan-out, and plan-driven decomposition |
 | **Retry + Fallback** | Each model call retries 2× then falls back through the model chain |
 | **Error Recovery** | If an agent crashes, the graph catches it and re-routes through the supervisor |
+| **Security Hardening** | Input validation, prompt-injection guards, output sanitisation, integrity checks |
 | **Structured Logging** | Full Output Channel with per-agent timing, routing, and fallback events |
 | **Rich Chat UI** | Agent headers, progress indicators, timing breakdowns, summary panels |
 | **Slash Commands** | 6 direct commands for bypassing the supervisor |
@@ -36,47 +43,86 @@ A **graph-based multi-agent system** that runs inside the VS Code Copilot chat p
                            │
                            ▼
                     ┌──────────────┐
-                    │  Supervisor  │  🧠 Routes to the right agent
+                    │  Supervisor  │  🧠 Routes & checks quality status
                     │ (Claude Opus)│
                     └──────┬───────┘
                            │
-          ┌────────┬───────┼────────┬───────────┬──────────┐
-          ▼        ▼       ▼        ▼           ▼          ▼
-     ┌─────────┐ ┌──────┐ ┌──────┐ ┌──────────┐ ┌───────┐ ┌────────┐
-     │ Planner │ │Coder │ │Resea-│ │UI Design-│ │ Test  │ │Revie-  │
-     │   📋    │ │  💻  │ │rcher │ │er  🎨    │ │ Gen   │ │wer ✅  │
-     │         │ │      │ │  🔍  │ │(Gemini   │ │ 🧪    │ │        │
-     │         │ │      │ │      │ │ 3 Pro)   │ │       │ │        │
-     └─────────┘ └──────┘ └──────┘ └──────────┘ └───────┘ └────────┘
-          │          │        │          │           │          │
-          └──────────┴────────┴──────────┴───────────┴──────────┘
-                              │
-                    ┌─────────▼──────────┐
-                    │  Inter-Agent Bus   │  Messages, code, specs,
-                    │  (Shared State)    │  test suites, feedback
-                    └────────────────────┘
+           ┌───────────────┼───────────────┐
+           ▼               ▼               ▼
+     ┌──────────┐   ┌────────────┐   ┌──────────────┐
+     │ Planner  │   │   Coder    │   │  Researcher  │ ...
+     │   📋     │   │    💻      │   │     🔍       │
+     └──────────┘   └─────┬──────┘   └──────────────┘
+                          │
+              ┌───────────┴───────────┐
+              │   Plan decomposition  │
+              │  (multi-domain tasks) │
+              └───────────┬───────────┘
+                          │
+          ┌───────────────┼───────────────┐
+          ▼               ▼               ▼
+   ┌────────────┐  ┌────────────┐  ┌────────────┐
+   │  Domain A  │  │  Domain B  │  │  Domain C  │  Parallel coders
+   │  Coder 💻  │  │  Coder 💻  │  │  Coder 💻  │  (independent)
+   └─────┬──────┘  └─────┬──────┘  └─────┬──────┘
+         │               │               │
+         ▼               ▼               ▼
+   ┌──────────┐    ┌──────────┐    ┌──────────┐
+   │ Quality  │    │ Quality  │    │ Quality  │    Per-domain
+   │  Gate 🔍 │    │  Gate 🔍 │    │  Gate 🔍 │    build+lint+test
+   └─────┬────┘    └─────┬────┘    └─────┬────┘
+         │               │               │
+         └───────────────┼───────────────┘
+                         ▼
+                  ┌─────────────┐
+                  │ Integrator  │  🏗️ Staff engineer — merges all
+                  │ (full CI)   │  domains + runs full quality gate
+                  └──────┬──────┘
+                         ▼
+                  ┌─────────────┐
+                  │  Reviewer   │  ✅ Sees CI status badges —
+                  │ (CI-aware)  │  lint/test/build signals
+                  └─────────────┘
 ```
 
 ### Agent Descriptions
 
 | Agent | Model | Icon | Purpose |
 |-------|-------|------|---------|
-| **Supervisor** | Claude Opus 4.6 | 🧠 | Reads the conversation and decides which agent should act next |
-| **Planner** | Claude Opus 4.6 | 📋 | Breaks complex tasks into numbered, actionable steps |
-| **Coder** | Claude Opus 4.6 | 💻 | Writes, edits, and generates production code |
+| **Supervisor** | Claude Opus 4.6 | 🧠 | Reads quality summaries & conversation, routes to the right agent |
+| **Planner** | Claude Opus 4.6 | 📋 | Breaks complex tasks into numbered, actionable steps with domain decomposition |
+| **Coder** | Claude Opus 4.6 | 💻 | Writes code → runs quality gate → self-reviews own diff → iterates until LGTM |
+| **Coder Pool** | Claude Opus 4.6 | 💻×N | Parallel domain coders — each owns a domain, runs independent quality gates |
+| **Integrator** | Claude Opus 4.6 | 🏗️ | Staff engineer — merges all domains, runs full CI pipeline, fixes cross-domain breaks |
 | **Researcher** | Claude Opus 4.6 | 🔍 | Gathers information, explains concepts, **searches GitHub** for reference repos |
 | **UI Designer** | Gemini 3 Pro | 🎨 | Designs components, layouts, styling, and accessibility |
 | **Test Generator** | Claude Opus 4.6 | 🧪 | Generates unit tests, integration tests, and test suites |
-| **Reviewer** | Claude Opus 4.6 | ✅ | Reviews code for correctness, quality — can send revisions back to Coder |
+| **Reviewer** | Claude Opus 4.6 | ✅ | CI-aware code review — sees build/lint/test status, blocks on CI failures |
 
 ### Inter-Agent Communication Flow
 
 ```
-Coder ──── broadcasts code ────▶ all agents
-UI Designer ── sends specs ────▶ Coder + Test Generator
-Test Generator ── sends tests ─▶ Reviewer + Coder
-Reviewer ── sends feedback ────▶ Coder (triggers revision loop)
+Planner ──── domain plan ──────▶ Coder Pool (fan-out)
+Domain Coders ── code + QA ────▶ Integrator (merge)
+Integrator ── merged code ─────▶ Reviewer (with CI status)
+Reviewer ── sends feedback ────▶ Coder / Integrator (revision loop)
 Researcher ── sends findings ──▶ all agents
+UI Designer ── sends specs ────▶ Coder + Test Generator
+```
+
+### Quality Gate Pipeline (per agent)
+
+```
+┌─────────┐   ┌──────┐   ┌───────┐   ┌──────┐   ┌─────────────┐
+│  Build  │──▶│ Lint │──▶│ Tests │──▶│ Diff │──▶│ Self-Review │
+│  (tsc)  │   │(esli-│   │(jest) │   │(git) │   │ (LLM LGTM)  │
+│         │   │ nt)  │   │       │   │      │   │             │
+└─────────┘   └──────┘   └───────┘   └──────┘   └─────────────┘
+     │            │           │          │              │
+     ▼            ▼           ▼          ▼              ▼
+  TS2304?    no-unused    FAIL ✗    +/- lines     "Fix X,Y,Z"
+  Fix type   -vars?      Fix test   context       Iterate...
+  errors     Fix lint     logic     for review     until LGTM
 ```
 
 ---
@@ -86,26 +132,46 @@ Researcher ── sends findings ──▶ all agents
 ```
 MultiAgentCopilt/
 ├── src/
-│   ├── extension.ts            # Entry point — registers @team chat participant
+│   ├── extension.ts              # Entry point — registers @team chat participant
 │   ├── agents/
-│   │   ├── base.ts             # Model selection, fallback chain, retry logic
-│   │   ├── supervisor.ts       # Routes requests to specialist agents
-│   │   ├── planner.ts          # Task decomposition
-│   │   ├── coder.ts            # Code generation with revision support
-│   │   ├── researcher.ts       # Research + GitHub repo search
-│   │   ├── ui_designer.ts      # UI/UX design (Gemini 3 Pro)
-│   │   ├── tester.ts           # Test generation
-│   │   └── reviewer.ts         # Code review with APPROVE/REVISE cycles
+│   │   ├── base.ts               # Model selection, fallback chain, retry, budget
+│   │   ├── supervisor.ts         # Routes requests, reads quality summaries
+│   │   ├── planner.ts            # Task decomposition with domain planning
+│   │   ├── coder.ts              # Code gen → quality gate → self-review loop
+│   │   ├── coderPool.ts          # Parallel domain coders with independent QA
+│   │   ├── integrator.ts         # Staff engineer — merge + full CI pipeline
+│   │   ├── researcher.ts         # Research + GitHub repo search
+│   │   ├── ui_designer.ts        # UI/UX design (Gemini 3 Pro)
+│   │   ├── tester.ts             # Test generation
+│   │   └── reviewer.ts           # CI-aware code review with APPROVE/REVISE
 │   ├── graph/
-│   │   ├── state.ts            # AgentState, inter-agent messaging, merge logic
-│   │   ├── builder.ts          # Graph executor with timing & error recovery
-│   │   └── router.ts           # Conditional edge routing
+│   │   ├── state.ts              # AgentState, inter-agent messaging, merge logic
+│   │   ├── builder.ts            # DAG executor with parallel fan-out & timing
+│   │   └── router.ts             # Conditional edge routing + plan-driven routing
+│   ├── security/
+│   │   └── securityConfig.ts     # Security thresholds, prompt-injection guards
+│   ├── types/
+│   │   ├── index.ts              # Shared type definitions
+│   │   └── security.ts           # Security-related types
 │   └── utils/
-│       ├── logger.ts           # Structured Output Channel logger
-│       └── github.ts           # GitHub Search API integration
-├── package.json                # Extension manifest with chat participant config
+│       ├── qualityGate.ts        # 🆕 Build+lint+test+diff CI pipeline
+│       ├── buildValidator.ts     # TypeScript build validation & diagnostics
+│       ├── fileWriter.ts         # Safe file writing with workspace resolution
+│       ├── terminalRunner.ts     # Terminal command execution
+│       ├── logger.ts             # Structured Output Channel logger
+│       ├── github.ts             # GitHub Search API integration
+│       ├── security.ts           # Input sanitisation & output validation
+│       ├── selfProtection.ts     # Self-modification guards
+│       ├── integrity.ts          # State integrity checks
+│       └── workspace.ts          # Workspace utilities
+├── src/__tests__/                # 21 test suites, 401 tests
+│   ├── agents/                   # Agent behaviour tests inc. quality gates
+│   ├── graph/                    # Graph builder, router, state tests
+│   ├── integration/              # File writer & terminal runner integration
+│   └── utils/                    # Quality gate, build validator, security tests
+├── package.json                  # Extension manifest with chat participant config
 ├── tsconfig.json
-└── .vscodeignore
+└── jest.config.js
 ```
 
 ---
@@ -257,7 +323,7 @@ interface AgentState {
   messages: AgentMessage[];       // Conversation history
   nextAgent: string;              // Supervisor's routing decision
   plan: string[];                 // Planner's output
-  artifacts: Record<string, string>; // Shared scratch-pad
+  artifacts: Record<string, string>; // Shared scratch-pad (see keys below)
   reviewCount: number;            // Review iteration counter
   reviewVerdict: ReviewVerdict;   // "approve" | "revise" | "pending"
   agentComms: InterAgentMessage[]; // Inter-agent message bus
@@ -265,17 +331,45 @@ interface AgentState {
   status: "in_progress" | "completed" | "error";
   finalAnswer: string;
 }
+
+// Key artifact keys set by agents:
+// build_status      — "success" | "failed (N errors)"
+// quality_summary   — "Build: ✅ | Lint: ✅ | Tests: ✅ (42/42)"
+// quality_errors    — formatted diagnostic report for LLM consumption
+// test_results      — "10 passed, 0 failed"
+// lint_results      — "0 errors, 0 warnings"
 ```
 
 ### Review Loop
 
-The Reviewer can send code back to the Coder for revision:
+The Reviewer can send code back to the Coder for revision. CI status is visible throughout:
 
 ```
-Coder → Reviewer → (REVISE) → Coder → Reviewer → (APPROVE) → FINISH
+Coder → Quality Gate → Self-Review → Integrator → Full CI → Reviewer
+  ↑                                                           │
+  └───────────── (REVISE — fix CI failures) ──────────────────┘
 ```
 
 Max 3 review cycles — auto-approves at the limit.
+
+---
+
+## 🏭 Meta Engineering Workflow
+
+The agents mirror what a team of real Meta engineers would do:
+
+| Step | Real Engineer | Agent Equivalent |
+|------|--------------|------------------|
+| 1. Plan | Tech lead breaks project into domains | **Planner** decomposes into domain tasks |
+| 2. Branch | Each IC takes a domain branch | **Coder Pool** fans out to parallel domain coders |
+| 3. Code | Write code in isolation | Each domain coder generates code independently |
+| 4. `arc lint` | Run automated lint checks | **Quality Gate** runs ESLint/Biome on written files |
+| 5. `arc unit` | Run related unit tests | **Quality Gate** runs `jest --findRelatedTests` |
+| 6. `arc diff` | Submit diff for review | **Self-Review** — LLM reviews own diff, iterates until LGTM |
+| 7. Merge | Staff engineer merges all branches | **Integrator** merges domains + runs full CI |
+| 8. CI | Full CI pipeline on merged code | `runFullQualityGate` — build + lint + all tests |
+| 9. Review | Senior engineer reviews with CI context | **Reviewer** sees CI status badges, blocks on failures |
+| 10. Land | Approve and land the diff | **Supervisor** checks `quality_summary`, marks complete |
 
 ---
 
