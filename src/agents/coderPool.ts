@@ -39,6 +39,35 @@ import {
 import { AgentOutputManager } from "../utils/agentOutputManager";
 import { showBatchDiffs } from "../utils/diffViewer";
 
+// ── Concurrency limiter ──────────────────────────────────────────────
+// Limits parallel LLM API calls to avoid overwhelming the Copilot rate
+// limit. Without this, N simultaneous domain coders cause throttling
+// and timeouts.
+
+class Semaphore {
+  private queue: (() => void)[] = [];
+  private running = 0;
+  constructor(private readonly max: number) {}
+  async acquire(): Promise<void> {
+    if (this.running < this.max) {
+      this.running++;
+      return;
+    }
+    return new Promise<void>((resolve) => this.queue.push(resolve));
+  }
+  release(): void {
+    this.running--;
+    const next = this.queue.shift();
+    if (next) {
+      this.running++;
+      next();
+    }
+  }
+}
+
+/** Max concurrent LLM calls across domain coders. */
+const LLM_CONCURRENCY = 2;
+
 // ── Prompts ──────────────────────────────────────────────────────────
 
 const DECOMPOSE_PROMPT = `You are a Staff Engineer responsible for decomposing a coding task
@@ -358,18 +387,27 @@ export async function coderPoolNode(
   // ── Set up output channels for parallel domain coders ──
   const outputMgr = AgentOutputManager.getInstance();
   if (domains.length > 1) {
-    stream.markdown(`> 🔀 Running **${domains.length} domain coders in parallel**…\n\n`);
-    stream.markdown(`> 📺 _Detailed output streaming to per-domain output channels_\n\n`);
+    stream.markdown(`> 🔀 Running **${domains.length} domain coders in parallel** (max ${LLM_CONCURRENCY} concurrent)…\n\n`);
     // Reveal output channels for all domains
     const domainChannelNames = domains.map(d => `coder`);
     outputMgr.revealParallel(domainChannelNames);
   }
 
-  // ── 3. Run all domain coders in parallel ──
+  // ── 3. Run domain coders with concurrency limit ──
+  // Cap parallel LLM calls to avoid overwhelming the Copilot API rate limit.
+  // With LLM_CONCURRENCY=2, two domain coders run at a time while others wait.
   const startAll = Date.now();
-  const promises = domains.map((domain) =>
-    runSingleDomainCoder(domain, domains, state, model, token)
-  );
+  const sem = new Semaphore(LLM_CONCURRENCY);
+  const promises = domains.map(async (domain, idx) => {
+    outputMgr.append("coder", `⏳ Domain ${idx + 1}/${domains.length}: ${domain.domain} — waiting for slot…\n`);
+    await sem.acquire();
+    outputMgr.append("coder", `🚀 Domain ${idx + 1}/${domains.length}: ${domain.domain} — generating code…\n`);
+    try {
+      return await runSingleDomainCoder(domain, domains, state, model, token);
+    } finally {
+      sem.release();
+    }
+  });
   const settled = await Promise.allSettled(promises);
 
   const results: DomainCoderResult[] = [];
@@ -414,9 +452,8 @@ export async function coderPoolNode(
     stream.markdown(
       `\n##### ${coderLabel} _(${formatMs(durationMs)})_\n\n`
     );
-    // Send full LLM output to the output channel (not chat)
-    outputMgr.append("coder", `\n═══ Domain: ${domain.domain} (${formatMs(durationMs)}) ═══\n`);
-    outputMgr.append("coder", response);
+    // Log status (NOT raw code) to the output channel
+    outputMgr.append("coder", `\n✅ Domain: ${domain.domain} — completed in ${formatMs(durationMs)}\n`);
 
     // Apply file writes
     const domainFiles: string[] = [];
@@ -427,6 +464,7 @@ export async function coderPoolNode(
       if (writeResult.written.length > 0) {
         // Show inline diffs for modified files
         await showBatchDiffs(writeResult.written, writeResult.oldContents);
+        outputMgr.append("coder", `   📁 Wrote ${writeResult.written.length} file(s): ${writeResult.written.join(", ")}\n`);
         stream.markdown(`> ✅ **${domain.domain}**: ${writeResult.written.length} file(s) written — diffs shown in editor\n`);
         logger.info(
           `coder:${domain.id}`,
@@ -547,6 +585,7 @@ export async function coderPoolNode(
 
         fixPromises.push(
           (async (): Promise<DomainCoderResult> => {
+            await sem.acquire();
             const start = Date.now();
             try {
               const fixMessages = buildMessages({
@@ -561,6 +600,8 @@ export async function coderPoolNode(
               return { domain: result.domain, response: fixResponse, durationMs: Date.now() - start };
             } catch (err: any) {
               return { domain: result.domain, response: "", durationMs: Date.now() - start, error: err?.message ?? String(err) };
+            } finally {
+              sem.release();
             }
           })()
         );

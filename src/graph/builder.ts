@@ -27,10 +27,10 @@ const DEFAULT_AGENT_TIMEOUT_MS = 120_000; // 2 minutes
  * N parallel LLM calls + file writes + terminal commands.
  */
 const AGENT_TIMEOUT_OVERRIDES: Record<string, number> = {
-  coder_pool: 300_000,  // 5 min — runs N domain coders in parallel internally
-  integrator: 180_000,  // 3 min — cross-domain merge can be slow
-  coder:      180_000,  // 3 min — may write many files + run commands
-  test_gen:   180_000,  // 3 min — generates tests then runs them
+  coder_pool: 480_000,  // 8 min — runs N domain coders with concurrency limit + file writes + QA
+  integrator: 240_000,  // 4 min — cross-domain merge can be slow
+  coder:      240_000,  // 4 min — may write many files + run commands
+  test_gen:   240_000,  // 4 min — generates tests then runs them
 };
 
 /** Resolve the timeout for a given agent. */

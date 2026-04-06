@@ -57,7 +57,6 @@ export async function testGen(
   const taskSummary = [...state.messages].reverse().find(m => m.role === "user")?.content ?? "test generation";
   outputMgr.startRun("test_gen", taskSummary);
   outputMgr.reveal("test_gen");
-  stream.markdown(`> 📺 _Detailed output streaming to **Test Generator** output channel_\n\n`);
 
   // Prefer Claude Opus for test generation
   const testResult = await selectModel(MODELS.claudeOpus);
@@ -106,9 +105,9 @@ export async function testGen(
     maxReferencesChars: 10_000,
   });
 
-  // Stream LLM output to the output channel, NOT the chat panel
-  const outputSink = { append: (text: string) => outputMgr.append("test_gen", text) };
-  const response = await callModel(activeModel, messages, null, token, "test_gen", outputSink);
+  // Collect LLM response silently — no raw code in output channels.
+  outputMgr.append("test_gen", "Generating tests…\n");
+  const response = await callModel(activeModel, messages, null, token, "test_gen");
 
   // ── Write test files to the workspace ──────────────────────────────
   let writtenFiles: string[] = [];
@@ -116,6 +115,7 @@ export async function testGen(
     const writeResult = await applyCodeToWorkspace(response, stream);
     writtenFiles = writeResult.written;
     if (writtenFiles.length > 0) {      await showBatchDiffs(writtenFiles, writeResult.oldContents);
+      outputMgr.append("test_gen", `Wrote ${writtenFiles.length} test file(s): ${writtenFiles.join(", ")}\n`);
       stream.markdown(`> ✅ **${writtenFiles.length} test file(s)** written — diffs shown in editor\n`);      logger.info("test_gen", `Wrote ${writtenFiles.length} test file(s): ${writtenFiles.join(", ")}`);
     }
   } catch (err: any) {

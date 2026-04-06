@@ -94,7 +94,6 @@ export async function coderNode(
   const taskSummary = [...state.messages].reverse().find(m => m.role === "user")?.content ?? "coding task";
   outputMgr.startRun("coder", taskSummary);
   outputMgr.reveal("coder");
-  stream.markdown(`> 📺 _Detailed output streaming to **Coder** output channel_\n\n`);
 
   // Build system prompt with capped sections
   let sysPrompt = SYSTEM_PROMPT;
@@ -125,9 +124,10 @@ export async function coderNode(
     maxReferencesChars: 10_000,
   });
 
-  // Stream LLM output to the output channel, NOT the chat panel
-  const outputSink = { append: (text: string) => outputMgr.append("coder", text) };
-  const response = await callModel(model, messages, null, token, "coder", outputSink);
+  // Collect LLM response silently — no raw code in chat or output channels.
+  // Files get written to disk and diffs shown in the editor.
+  outputMgr.append("coder", "Generating code…\n");
+  const response = await callModel(model, messages, null, token, "coder");
 
   postAgentMessage(state, "coder", "*", "info", response);
   logger.agentMessage("coder", "*", "Code posted to message bus");
@@ -141,6 +141,7 @@ export async function coderNode(
     allOldContents = result.oldContents;
     if (writtenFiles.length > 0) {
       logger.info("coder", `Applied ${writtenFiles.length} file(s) to workspace: ${writtenFiles.join(", ")}`);
+      outputMgr.append("coder", `Wrote ${writtenFiles.length} file(s): ${writtenFiles.join(", ")}\n`);
       // Show inline diffs for modified files (like Copilot/Claude)
       await showBatchDiffs(writtenFiles, allOldContents);
     } else {
@@ -201,8 +202,8 @@ export async function coderNode(
           maxReferencesChars: 6_000,
         });
 
-        outputMgr.append("coder", `\n--- Fix attempt ${attempt + 1} ---\n`);
-        const fixResponse = await callModel(model, fixMessages, null, token, `coder-fix-${attempt + 1}`, outputSink);
+        outputMgr.append("coder", `Fix attempt ${attempt + 1}…\n`);
+        const fixResponse = await callModel(model, fixMessages, null, token, `coder-fix-${attempt + 1}`);
         lastResponse = fixResponse;
 
         try {
@@ -224,7 +225,7 @@ export async function coderNode(
         const diff = qaReport.diff || await generateDiffReport(wsRoot, writtenFiles);
         if (diff && diff.trim().length > 50) {
           stream.markdown(`\n> 🔍 **Self-reviewing** changes before peer review…\n`);
-          outputMgr.append("coder", "\n--- Self-review ---\n");
+          outputMgr.append("coder", "Self-reviewing changes…\n");
 
           const reviewMessages = buildMessages({
             systemPrompt: SELF_REVIEW_PROMPT +
@@ -237,7 +238,7 @@ export async function coderNode(
             maxWorkspaceChars: 4_000,
           });
 
-          const reviewResp = await callModel(model, reviewMessages, null, token, "coder-self-review", outputSink);
+          const reviewResp = await callModel(model, reviewMessages, null, token, "coder-self-review");
 
           if (!reviewResp.toUpperCase().includes("LGTM")) {
             try {

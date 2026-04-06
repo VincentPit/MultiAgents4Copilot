@@ -94,7 +94,6 @@ export async function integratorNode(
   const taskSummary = `Integrating ${state.domainAssignments.length} domain outputs`;
   outputMgr.startRun("integrator", taskSummary);
   outputMgr.reveal("integrator");
-  stream.markdown(`> 📺 _Detailed output streaming to **Integration Engineer** output channel_\n\n`);
 
   const domains = state.domainAssignments;
 
@@ -151,9 +150,9 @@ export async function integratorNode(
     maxReferencesChars: 4_000,
   });
 
-  // Stream LLM output to the output channel, NOT the chat panel
-  const outputSink = { append: (text: string) => outputMgr.append("integrator", text) };
-  const response = await callModel(model, messages, null, token, "integrator", outputSink);
+  // Collect LLM response silently — no raw code in output channels.
+  outputMgr.append("integrator", "Generating integration code…\n");
+  const response = await callModel(model, messages, null, token, "integrator");
 
   // ── Apply integration files ──
   let writtenFiles: string[] = [];
@@ -165,6 +164,7 @@ export async function integratorNode(
     allOldContents = result.oldContents;
     if (writtenFiles.length > 0) {
       await showBatchDiffs(writtenFiles, allOldContents);
+      outputMgr.append("integrator", `Wrote ${writtenFiles.length} file(s): ${writtenFiles.join(", ")}\n`);
       stream.markdown(`> ✅ **${writtenFiles.length} integration file(s)** written — diffs shown in editor\n`);
       logger.info(
         "integrator",
@@ -223,8 +223,8 @@ export async function integratorNode(
         maxWorkspaceChars: 6_000,
       });
 
-      outputMgr.append("integrator", `\n--- CI fix attempt ${attempt + 1} ---\n`);
-      const fixResponse = await callModel(model, fixMessages, null, token, `integrator-fix-${attempt + 1}`, outputSink);
+      outputMgr.append("integrator", `CI fix attempt ${attempt + 1}…\n`);
+      const fixResponse = await callModel(model, fixMessages, null, token, `integrator-fix-${attempt + 1}`);
       lastResponse = fixResponse;
 
       try {
