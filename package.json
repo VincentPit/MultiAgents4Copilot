@@ -2,7 +2,7 @@
   "name": "multi-agent-copilot",
   "displayName": "Multi-Agent Copilot",
   "description": "Graph-based multi-agent system with parallel domain coders inside the Copilot chat panel",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "publisher": "stephenlee",
   "engines": {
     "vscode": "^1.99.0"
