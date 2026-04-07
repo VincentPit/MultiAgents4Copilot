@@ -4,6 +4,7 @@ A **graph-based multi-agent system** that runs inside the VS Code Copilot chat p
 
 ![VS Code](https://img.shields.io/badge/VS%20Code-^1.99.0-007ACC?logo=visualstudiocode)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.9+-3178C6?logo=typescript&logoColor=white)
+![Go](https://img.shields.io/badge/Go-1.22-00ADD8?logo=go&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![Agents](https://img.shields.io/badge/Agents-9-blueviolet)
 ![Tests](https://img.shields.io/badge/Tests-401_passing-brightgreen)
@@ -15,17 +16,21 @@ A **graph-based multi-agent system** that runs inside the VS Code Copilot chat p
 | Feature | Description |
 |---------|-------------|
 | **9 Specialist Agents** | Supervisor, Planner, Coder, Coder Pool (parallel), Integrator, Researcher, UI Designer, Test Generator, Reviewer |
+| **Go Worker Parallelism** | Domain coders run as goroutines via a Go child process — true OS-level parallelism, not just `Promise.allSettled` |
+| **Live Webview Dashboard** | A side-by-side grid of domain cards opens automatically — live-scrolling logs and status badges per domain |
 | **Meta-Style Quality Gates** | Every agent runs `build → lint → tests → diff` before marking code complete — like `arc diff` |
 | **Self-Review** | Coders review their own diffs (LLM checks for LGTM) before submitting — catches mistakes before review |
-| **Parallel Domain Coders** | Large tasks fan out to independent domain coders that work simultaneously, each with their own quality gate |
+| **Parallel Domain Coders** | Large tasks fan out to 2–6 independent domain coders, each with their own quality gate (hard cap enforced) |
 | **Full CI Pipeline** | The Integrator (staff engineer) merges all domains and runs `runFullQualityGate` on the whole project |
+| **Scaffold Generation** | Planner produces a project scaffold (directory tree + boilerplate) before domain coders begin coding |
 | **CI-Aware Code Review** | Reviewer sees build/lint/test status badges — CI failures are blocking issues |
 | **Multi-Model** | Claude Opus 4.6 (default) + Gemini 3 Pro (UI design) with automatic fallback |
 | **Inter-Agent Communication** | Shared message bus — agents post context for each other |
 | **GitHub Repo Search** | Researcher searches GitHub for professional reference repos matching your idea |
 | **DAG Graph Orchestration** | State-machine executor with conditional routing, parallel fan-out, and plan-driven decomposition |
+| **No Per-Agent Timeouts** | Agents run to completion — only a 30-minute wall-clock guard prevents infinite runs |
 | **Retry + Fallback** | Each model call retries 2× then falls back through the model chain |
-| **Error Recovery** | If an agent crashes, the graph catches it and re-routes through the supervisor |
+| **Error Recovery** | If an agent crashes, the graph catches it, logs the run, and re-routes through the supervisor |
 | **Security Hardening** | Input validation, prompt-injection guards, output sanitisation, integrity checks |
 | **Structured Logging** | Full Output Channel with per-agent timing, routing, and fallback events |
 | **Rich Chat UI** | Agent headers, progress indicators, timing breakdowns, summary panels |
@@ -56,14 +61,14 @@ A **graph-based multi-agent system** that runs inside the VS Code Copilot chat p
                           │
               ┌───────────┴───────────┐
               │   Plan decomposition  │
-              │  (multi-domain tasks) │
+              │   + scaffold gen      │
               └───────────┬───────────┘
                           │
           ┌───────────────┼───────────────┐
           ▼               ▼               ▼
    ┌────────────┐  ┌────────────┐  ┌────────────┐
-   │  Domain A  │  │  Domain B  │  │  Domain C  │  Parallel coders
-   │  Coder 💻  │  │  Coder 💻  │  │  Coder 💻  │  (independent)
+   │  Domain A  │  │  Domain B  │  │  Domain C  │  Go goroutines
+   │  Coder 💻  │  │  Coder 💻  │  │  Coder 💻  │  (true parallel)
    └─────┬──────┘  └─────┬──────┘  └─────┬──────┘
          │               │               │
          ▼               ▼               ▼
@@ -73,6 +78,14 @@ A **graph-based multi-agent system** that runs inside the VS Code Copilot chat p
    └─────┬────┘    └─────┬────┘    └─────┬────┘
          │               │               │
          └───────────────┼───────────────┘
+                         ▼
+        ┌──────────────────────────────────┐
+        │   Live Webview Dashboard 📊       │
+        │  ┌──────┐ ┌──────┐ ┌──────┐     │
+        │  │ Dom A│ │ Dom B│ │ Dom C│     │
+        │  │ logs │ │ logs │ │ logs │     │
+        │  └──────┘ └──────┘ └──────┘     │
+        └────────────────┬─────────────────┘
                          ▼
                   ┌─────────────┐
                   │ Integrator  │  🏗️ Staff engineer — merges all
@@ -85,14 +98,27 @@ A **graph-based multi-agent system** that runs inside the VS Code Copilot chat p
                   └─────────────┘
 ```
 
+### Go Worker Pipeline
+
+Domain coders run through a 3-layer pipeline for true parallelism:
+
+```
+Go Worker (goroutines)  →  GoWorkerBridge (JSON-RPC)  →  AgentOutputManager (webview)
+       ▲                          │                              │
+ OS-level parallel         stdin/stdout IPC              postMessage to dashboard
+ domain execution          protocol bridge               live DOM updates
+```
+
+When Go is unavailable the system falls back to Node.js `Promise.allSettled` with a concurrency semaphore.
+
 ### Agent Descriptions
 
 | Agent | Model | Icon | Purpose |
 |-------|-------|------|---------|
 | **Supervisor** | Claude Opus 4.6 | 🧠 | Reads quality summaries & conversation, routes to the right agent |
-| **Planner** | Claude Opus 4.6 | 📋 | Breaks complex tasks into numbered, actionable steps with domain decomposition |
+| **Planner** | Claude Opus 4.6 | 📋 | Breaks complex tasks into numbered steps + scaffold + domain decomposition |
 | **Coder** | Claude Opus 4.6 | 💻 | Writes code → runs quality gate → self-reviews own diff → iterates until LGTM |
-| **Coder Pool** | Claude Opus 4.6 | 💻×N | Parallel domain coders — each owns a domain, runs independent quality gates |
+| **Coder Pool** | Claude Opus 4.6 | 💻×N | Parallel domain coders (2–6, hard cap) via Go goroutines, independent QA per domain |
 | **Integrator** | Claude Opus 4.6 | 🏗️ | Staff engineer — merges all domains, runs full CI pipeline, fixes cross-domain breaks |
 | **Researcher** | Claude Opus 4.6 | 🔍 | Gathers information, explains concepts, **searches GitHub** for reference repos |
 | **UI Designer** | Gemini 3 Pro | 🎨 | Designs components, layouts, styling, and accessibility |
@@ -102,12 +128,12 @@ A **graph-based multi-agent system** that runs inside the VS Code Copilot chat p
 ### Inter-Agent Communication Flow
 
 ```
-Planner ──── domain plan ──────▶ Coder Pool (fan-out)
-Domain Coders ── code + QA ────▶ Integrator (merge)
-Integrator ── merged code ─────▶ Reviewer (with CI status)
-Reviewer ── sends feedback ────▶ Coder / Integrator (revision loop)
-Researcher ── sends findings ──▶ all agents
-UI Designer ── sends specs ────▶ Coder + Test Generator
+Planner ──── scaffold + domain plan ──▶ Coder Pool (fan-out)
+Domain Coders ── code + QA ───────────▶ Integrator (merge)
+Integrator ── merged code ────────────▶ Reviewer (with CI status)
+Reviewer ── sends feedback ───────────▶ Coder / Integrator (revision loop)
+Researcher ── sends findings ─────────▶ all agents
+UI Designer ── sends specs ───────────▶ Coder + Test Generator
 ```
 
 ### Quality Gate Pipeline (per agent)
@@ -136,17 +162,22 @@ MultiAgentCopilt/
 │   ├── agents/
 │   │   ├── base.ts               # Model selection, fallback chain, retry, budget
 │   │   ├── supervisor.ts         # Routes requests, reads quality summaries
-│   │   ├── planner.ts            # Task decomposition with domain planning
+│   │   ├── planner.ts            # Task decomposition + scaffold generation
 │   │   ├── coder.ts              # Code gen → quality gate → self-review loop
-│   │   ├── coderPool.ts          # Parallel domain coders with independent QA
+│   │   ├── coderPool.ts          # Go-powered parallel domain coders (MAX_DOMAINS=6)
 │   │   ├── integrator.ts         # Staff engineer — merge + full CI pipeline
 │   │   ├── researcher.ts         # Research + GitHub repo search
 │   │   ├── ui_designer.ts        # UI/UX design (Gemini 3 Pro)
 │   │   ├── tester.ts             # Test generation
 │   │   └── reviewer.ts           # CI-aware code review with APPROVE/REVISE
+│   ├── go-worker/                # Go child process for true parallelism
+│   │   ├── main.go               # Entry point — stdin/stdout JSON-RPC server
+│   │   ├── worker.go             # Goroutine-per-domain executor
+│   │   ├── protocol.go           # Request/response message types
+│   │   └── go.mod                # Go 1.22 module definition
 │   ├── graph/
 │   │   ├── state.ts              # AgentState, inter-agent messaging, merge logic
-│   │   ├── builder.ts            # DAG executor with parallel fan-out & timing
+│   │   ├── builder.ts            # DAG executor — no per-agent timeouts, 30min wall-clock
 │   │   └── router.ts             # Conditional edge routing + plan-driven routing
 │   ├── security/
 │   │   └── securityConfig.ts     # Security thresholds, prompt-injection guards
@@ -154,9 +185,12 @@ MultiAgentCopilt/
 │   │   ├── index.ts              # Shared type definitions
 │   │   └── security.ts           # Security-related types
 │   └── utils/
-│       ├── qualityGate.ts        # 🆕 Build+lint+test+diff CI pipeline
+│       ├── agentOutputManager.ts # Per-agent channels + live webview dashboard
+│       ├── qualityGate.ts        # Build+lint+test+diff CI pipeline
 │       ├── buildValidator.ts     # TypeScript build validation & diagnostics
+│       ├── diffViewer.ts         # Side-by-side diff rendering
 │       ├── fileWriter.ts         # Safe file writing with workspace resolution
+│       ├── goWorkerBridge.ts     # JSON-RPC bridge to Go child process
 │       ├── terminalRunner.ts     # Terminal command execution
 │       ├── logger.ts             # Structured Output Channel logger
 │       ├── github.ts             # GitHub Search API integration
@@ -169,6 +203,7 @@ MultiAgentCopilt/
 │   ├── graph/                    # Graph builder, router, state tests
 │   ├── integration/              # File writer & terminal runner integration
 │   └── utils/                    # Quality gate, build validator, security tests
+├── reinstall.sh                  # Quick package + install shell shortcut
 ├── package.json                  # Extension manifest with chat participant config
 ├── tsconfig.json
 └── jest.config.js
@@ -180,12 +215,13 @@ MultiAgentCopilt/
 
 ### Prerequisites
 
-- **VS Code** ≥ 1.93.0
+- **VS Code** ≥ 1.99.0
 - **GitHub Copilot Chat** extension installed and signed in
 - **Node.js** ≥ 18
+- **Go** ≥ 1.22 *(optional — falls back to JS parallelism if missing)*
 - A **GitHub Copilot subscription** (provides access to Claude Opus 4.6 and Gemini 3 Pro)
 
-### Install from VSIX
+### Install from Source
 
 ```bash
 # Clone the repo
@@ -196,14 +232,27 @@ cd MultiAgents4Copilot
 npm install
 npm run compile
 
+# Build Go worker (optional — requires Go 1.22+)
+npm run go:build
+
 # Package as VSIX
-npx @vscode/vsce package --allow-missing-repository -o multi-agent-copilot.vsix
+npx @vscode/vsce package --no-dependencies --allow-missing-repository --allow-package-secrets github
 
 # Install in VS Code
-code --install-extension multi-agent-copilot.vsix --force
+code --install-extension multi-agent-copilot-0.7.0.vsix --force
 ```
 
 Then reload VS Code: **⌘+Shift+P** → **Developer: Reload Window**
+
+### Quick Reinstall
+
+After making changes, use the included script:
+
+```bash
+./reinstall.sh
+```
+
+This compiles, packages, and installs in one step.
 
 ### Development (F5 Debug)
 
@@ -225,6 +274,14 @@ Type in the Copilot chat panel — the supervisor will route through agents auto
 @team refactor this function to be more testable
 ```
 
+For large builds the system will:
+1. **Plan** — decompose into 2–6 domains with scaffold
+2. **Fan out** — spawn parallel domain coders (Go goroutines)
+3. **Dashboard** — open a live webview with per-domain log cards
+4. **Quality gate** — each domain runs build → lint → test → self-review
+5. **Integrate** — staff engineer merges all domains + full CI
+6. **Review** — CI-aware code review with status badges
+
 ### Slash Commands (Direct Mode)
 
 Bypass the supervisor and talk directly to a specific agent:
@@ -233,7 +290,7 @@ Bypass the supervisor and talk directly to a specific agent:
 |---------|-------|---------|
 | `/plan` | 📋 Planner | `@team /plan migrate our auth to OAuth2` |
 | `/code` | 💻 Coder | `@team /code fibonacci function in Rust` |
-| `/research` | 🔍 Researcher | `@team /research best real-time database for collaborative apps` |
+| `/build` | 💻×N Coder Pool | `@team /build a full-stack e-commerce app` |
 | `/review` | ✅ Reviewer | `@team /review <paste code>` |
 | `/design` | 🎨 UI Designer | `@team /design a settings page with tabs` |
 | `/test` | 🧪 Test Generator | `@team /test write tests for this auth module` |
@@ -251,6 +308,35 @@ This will:
 2. Search GitHub for top repos by stars
 3. Render a table of professional reference repos
 4. Analyse architecture patterns, tech stacks, and what you can learn from them
+
+---
+
+## 📊 Live Dashboard
+
+When parallel domain coders are active, a **webview panel** opens beside the editor:
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  🏢 Domain Coders Dashboard                                     │
+├──────────────────┬──────────────────┬────────────────────────────┤
+│  backend-api     │  frontend-ui     │  database-layer            │
+│  ● coding        │  ● coding        │  ● queued                  │
+│                  │                  │                            │
+│  📁 routes.ts    │  🎨 App.tsx      │  (waiting...)              │
+│  📁 auth.ts      │  📁 Dashboard.tsx│                            │
+│  🔨 Building...  │  📁 styles.css   │                            │
+│  ✅ Build pass   │  🔨 Building...  │                            │
+│  🧪 Tests: 8/8   │  ✅ Build pass   │                            │
+│                  │  🧪 Tests: 5/5   │                            │
+└──────────────────┴──────────────────┴────────────────────────────┘
+```
+
+Each card shows:
+- **Status badge** — queued → coding → building → tests → done / failed
+- **Live-scrolling logs** — files written, build output, test results
+- **Auto-scroll** — logs scroll to the bottom as new lines arrive
+
+Updates are pushed via `postMessage` (single DOM mutations — no flicker or flooding).
 
 ---
 
@@ -273,7 +359,7 @@ If a model is unavailable or fails:
 
 ---
 
-## 📊 Logging
+## 📋 Logging
 
 Open the Output panel (**⌘+Shift+U**) and select **"Multi-Agent Copilot"** from the dropdown to see structured logs:
 
@@ -296,12 +382,23 @@ Open the Output panel (**⌘+Shift+U**) and select **"Multi-Agent Copilot"** fro
 After making changes to the source:
 
 ```bash
+# Option 1 — one-liner
+./reinstall.sh
+
+# Option 2 — manual
 npm run compile && \
-npx @vscode/vsce package --allow-missing-repository -o multi-agent-copilot.vsix && \
-code --install-extension multi-agent-copilot.vsix --force
+npm run go:build && \
+npx @vscode/vsce package --no-dependencies --allow-missing-repository --allow-package-secrets github && \
+code --install-extension multi-agent-copilot-0.7.0.vsix --force
 ```
 
 Then: **⌘+Shift+P** → **Developer: Reload Window**
+
+### Cross-Platform Go Builds
+
+```bash
+npm run go:build:all   # builds darwin-arm64, darwin-amd64, linux-amd64, windows-amd64
+```
 
 ---
 
@@ -314,7 +411,9 @@ The graph is a lightweight state-machine (no LangGraph dependency):
 - **Nodes** are async functions: `(state, model, stream, token) → Partial<AgentState>`
 - **Edges** are determined by router functions (`routeSupervisor`, `routeReviewer`)
 - **Max 15 steps** to prevent infinite loops
+- **30-minute wall-clock** — no per-agent timeouts (agents run to completion)
 - Each node is timed and wrapped in try/catch for error recovery
+- Errored agents are still recorded in the summary (not silently dropped)
 
 ### State
 
@@ -340,6 +439,14 @@ interface AgentState {
 // lint_results      — "0 errors, 0 warnings"
 ```
 
+### Domain Decomposition
+
+The Planner's domain plan is capped at **MAX_DOMAINS = 6**:
+
+1. The LLM prompt instructs "BETWEEN 2 AND 6 independent domains" (hard limit)
+2. `parseDomainAssignments()` clamps results with `slice(0, MAX_DOMAINS)`
+3. If the LLM returns more, a warning is logged and excess domains are dropped
+
 ### Review Loop
 
 The Reviewer can send code back to the Coder for revision. CI status is visible throughout:
@@ -360,16 +467,17 @@ The agents mirror what a team of real Meta engineers would do:
 
 | Step | Real Engineer | Agent Equivalent |
 |------|--------------|------------------|
-| 1. Plan | Tech lead breaks project into domains | **Planner** decomposes into domain tasks |
-| 2. Branch | Each IC takes a domain branch | **Coder Pool** fans out to parallel domain coders |
-| 3. Code | Write code in isolation | Each domain coder generates code independently |
-| 4. `arc lint` | Run automated lint checks | **Quality Gate** runs ESLint/Biome on written files |
-| 5. `arc unit` | Run related unit tests | **Quality Gate** runs `jest --findRelatedTests` |
-| 6. `arc diff` | Submit diff for review | **Self-Review** — LLM reviews own diff, iterates until LGTM |
-| 7. Merge | Staff engineer merges all branches | **Integrator** merges domains + runs full CI |
-| 8. CI | Full CI pipeline on merged code | `runFullQualityGate` — build + lint + all tests |
-| 9. Review | Senior engineer reviews with CI context | **Reviewer** sees CI status badges, blocks on failures |
-| 10. Land | Approve and land the diff | **Supervisor** checks `quality_summary`, marks complete |
+| 1. Plan | Tech lead breaks project into domains | **Planner** decomposes into domain tasks + generates scaffold |
+| 2. Branch | Each IC takes a domain branch | **Coder Pool** fans out to parallel domain coders (Go goroutines) |
+| 3. Dashboard | Engineers watch CI dashboards | **Webview Dashboard** shows live per-domain progress |
+| 4. Code | Write code in isolation | Each domain coder generates code independently |
+| 5. `arc lint` | Run automated lint checks | **Quality Gate** runs ESLint/Biome on written files |
+| 6. `arc unit` | Run related unit tests | **Quality Gate** runs `jest --findRelatedTests` |
+| 7. `arc diff` | Submit diff for review | **Self-Review** — LLM reviews own diff, iterates until LGTM |
+| 8. Merge | Staff engineer merges all branches | **Integrator** merges domains + runs full CI |
+| 9. CI | Full CI pipeline on merged code | `runFullQualityGate` — build + lint + all tests |
+| 10. Review | Senior engineer reviews with CI context | **Reviewer** sees CI status badges, blocks on failures |
+| 11. Land | Approve and land the diff | **Supervisor** checks `quality_summary`, marks complete |
 
 ---
 

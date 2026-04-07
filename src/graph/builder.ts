@@ -17,29 +17,11 @@ import { logger } from "../utils/logger";
 import { getSecurityConfig } from "../security/securityConfig";
 import { AgentOutputManager } from "../utils/agentOutputManager";
 
-/** Default per-agent timeout (ms). */
-const DEFAULT_AGENT_TIMEOUT_MS = 120_000; // 2 minutes
-
-/**
- * Per-agent timeout overrides (ms).
- * Agents that perform internal fan-out (like coder_pool) need much
- * longer than single-call agents because they run decomposition +
- * N parallel LLM calls + file writes + terminal commands.
- */
-const AGENT_TIMEOUT_OVERRIDES: Record<string, number> = {
-  coder_pool: 480_000,  // 8 min — runs N domain coders with concurrency limit + file writes + QA
-  integrator: 240_000,  // 4 min — cross-domain merge can be slow
-  coder:      240_000,  // 4 min — may write many files + run commands
-  test_gen:   240_000,  // 4 min — generates tests then runs them
-};
-
-/** Resolve the timeout for a given agent. */
-function agentTimeout(name: string): number {
-  return AGENT_TIMEOUT_OVERRIDES[name] ?? DEFAULT_AGENT_TIMEOUT_MS;
-}
+/** Default per-agent timeout (ms) — used only for progress bar display width. */
+const DEFAULT_AGENT_DISPLAY_MS = 120_000;
 
 /** Wall-clock timeout for the entire graph run (ms). */
-const GRAPH_WALL_CLOCK_MS = 600_000; // 10 minutes
+const GRAPH_WALL_CLOCK_MS = 1_800_000; // 30 minutes
 
 /** Maximum accumulated errors before force-finishing. */
 const MAX_ERROR_COUNT = 10;
@@ -125,7 +107,11 @@ export class ProgressTracker {
     this.agents = this.agents.filter(a => !(a.name === name && a.status === "pending"));
     this.agents.push({ name, status: "running", startMs: Date.now() });
     this.emitProgressLine();
-    this.startTick();
+    // coder_pool streams its own detailed per-domain progress — skip the
+    // periodic tick so we don't spam the chat with hundreds of identical bars.
+    if (name !== "coder_pool") {
+      this.startTick();
+    }
   }
 
   /** Mark an agent as completed. */
@@ -214,7 +200,7 @@ export class ProgressTracker {
       const a = running[0];
       const display = AGENT_DISPLAY[a.name] ?? { icon: "⚙️", label: a.name };
       const elapsed = formatDurationShort(now - a.startMs);
-      const bar = renderMiniBar(now - a.startMs, agentTimeout(a.name));
+      const bar = renderMiniBar(now - a.startMs, DEFAULT_AGENT_DISPLAY_MS);
       this.stream.progress(`${display.icon} ${display.label}  ${bar}  ${elapsed}`);
     } else {
       // Multiple agents running in parallel
@@ -230,7 +216,7 @@ export class ProgressTracker {
   /** Show a small completion card in markdown after a sequential agent finishes. */
   private emitAgentCompletionCard(name: string, durationMs: number): void {
     const display = AGENT_DISPLAY[name] ?? { icon: "⚙️", label: name };
-    const bar = renderProgressBar(durationMs, agentTimeout(name), 20);
+    const bar = renderProgressBar(durationMs, Math.max(durationMs, DEFAULT_AGENT_DISPLAY_MS), 20);
     const elapsed = formatDurationShort(durationMs);
 
     // Don't show cards for supervisor (too noisy — it runs many times)
@@ -246,7 +232,7 @@ export class ProgressTracker {
     if (this.tickTimer) { return; } // Already running
     this.tickTimer = setInterval(() => {
       this.emitProgressLine();
-    }, 1_000); // Update every second
+    }, 10_000); // Update every 10 seconds (not every 1s — stream.progress appends, not replaces)
   }
 
   /** Stop the periodic tick. */
@@ -306,20 +292,7 @@ export function buildGraph(config: GraphConfig) {
     const start = Date.now();
     logger.agentStart(name);
     try {
-      // Race agent execution against a per-agent timeout
-      const timeoutMs = agentTimeout(name);
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error(`Agent "${name}" timed out after ${timeoutMs}ms`)),
-          timeoutMs,
-        );
-      });
-
-      const update = await Promise.race([
-        nodeFn(state, model, stream, token),
-        timeoutPromise,
-      ]).finally(() => { if (timer) clearTimeout(timer); });
+      const update = await nodeFn(state, model, stream, token);
 
       const durationMs = Date.now() - start;
       logger.agentEnd(name, durationMs);
@@ -489,6 +462,9 @@ export function buildGraph(config: GraphConfig) {
         stream.markdown(`\n\n> ⚠️ **${display.label}** encountered an error: ${error}\n`);
         state.errors = [...(state.errors ?? []), `${currentNode}: ${error}`];
         failedAgents.add(currentNode);
+
+        // Still record the run so the summary shows this agent executed
+        agentRuns.push({ name: currentNode, durationMs });
 
         // ── Automatic fallback: coder_pool → single coder ──
         if (currentNode === "coder_pool" && !failedAgents.has("coder") && nodes["coder"]) {

@@ -54,13 +54,15 @@
     ]
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "npm run compile && npm run go:build",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
     "lint": "eslint src --ext ts --fix",
     "test": "jest --coverage",
     "package": "npx @vscode/vsce package --no-dependencies",
-    "pretest": "npm run compile"
+    "pretest": "npm run compile",
+    "go:build": "cd src/go-worker && go build -o ../../out/go-worker .",
+    "go:build:all": "cd src/go-worker && GOOS=darwin GOARCH=arm64 go build -o ../../out/go-worker-darwin-arm64 . && GOOS=darwin GOARCH=amd64 go build -o ../../out/go-worker-darwin-amd64 . && GOOS=linux GOARCH=amd64 go build -o ../../out/go-worker-linux-amd64 . && GOOS=windows GOARCH=amd64 go build -o ../../out/go-worker-windows-amd64.exe ."
   },
   "devDependencies": {
     "@types/jest": "^29.5.14",

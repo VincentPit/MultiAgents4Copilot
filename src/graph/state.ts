@@ -60,6 +60,58 @@ export interface DomainAssignment {
   provides: string;
   /** Interfaces/exports this domain consumes from others. */
   consumes: string;
+  /** Detailed API specifications from Staff Engineer decomposition. */
+  apiSpec?: DomainAPISpec;
+}
+
+/** Detailed API specification for a domain assignment. */
+export interface DomainAPISpec {
+  /** API endpoints to implement with exact schemas. */
+  endpoints: APIEndpoint[];
+  /** Interface contracts to export/import with exact type definitions. */
+  interfaces: InterfaceContract[];
+  /** Specific test cases the domain coder MUST write. */
+  testCases: string[];
+  /** NPM/pip dependencies needed for this domain. */
+  dependencies: string[];
+}
+
+/** A single API endpoint specification. */
+export interface APIEndpoint {
+  method: string;
+  path: string;
+  requestSchema: string;
+  responseSchema: string;
+  description: string;
+}
+
+/** An interface/type contract between domains. */
+export interface InterfaceContract {
+  name: string;
+  definition: string;
+  exportedFrom: string;
+}
+
+/** Result from a single domain branch in the Go worker pool. */
+export interface BranchResult {
+  /** Domain ID that produced this branch. */
+  domainId: string;
+  /** Human-readable domain name. */
+  domain: string;
+  /** Files written by this domain coder. */
+  filesWritten: string[];
+  /** Whether individual tests passed. */
+  testsPassed: boolean;
+  /** Test output for debugging. */
+  testOutput: string;
+  /** Errors encountered. */
+  errors: string[];
+  /** Number of fix attempts made. */
+  fixAttempts: number;
+  /** LLM-generated code for integrator reference. */
+  code: string;
+  /** Duration in milliseconds. */
+  durationMs: number;
 }
 
 /** The central state object for the graph. */
@@ -114,6 +166,9 @@ export interface AgentState {
 
   /** Domain assignments for parallel coder pool. */
   domainAssignments: DomainAssignment[];
+
+  /** Per-branch results from Go worker pool (for integrator feedback loop). */
+  branchResults: BranchResult[];
 }
 
 /** Result from a terminal command execution. */
@@ -150,6 +205,7 @@ export function createInitialState(userMessage: string, workspaceContext: string
     chatHistory: "",
     terminalResults: [],
     domainAssignments: [],
+    branchResults: [],
   };
 }
 
@@ -214,6 +270,11 @@ export function mergeState(
   if (update.terminalResults) {
     merged.terminalResults = [...current.terminalResults, ...update.terminalResults];
   }
+
+  // Branch results: replace (from coder pool) — integrator reads, doesn't write
+  // If branchResults are provided, they represent the latest complete set from the coder pool.
+  // No append needed — each coder pool run produces a complete set.
+  // (branchResults is already handled by the spread in { ...current, ...update })
 
   // ── Enforce size caps to prevent unbounded growth ──
   if (merged.messages.length > MAX_MESSAGES) {
