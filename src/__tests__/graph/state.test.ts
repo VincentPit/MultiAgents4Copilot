@@ -241,6 +241,51 @@ describe("mergeState — size caps", () => {
     expect(merged.messages).toHaveLength(2);
     expect(merged.finalAnswer).toBe("short answer");
   });
+
+  it("caps plan array at 50 steps", () => {
+    const update = {
+      plan: Array.from({ length: 60 }, (_, i) => `${i + 1}. (coder) Step ${i + 1}`),
+    };
+    const merged = mergeState(base, update);
+    expect(merged.plan.length).toBeLessThanOrEqual(50);
+    // Keeps earliest steps (plans are read front-to-back)
+    expect(merged.plan[0]).toContain("Step 1");
+  });
+
+  it("caps domainAssignments at 20", () => {
+    const update = {
+      domainAssignments: Array.from({ length: 25 }, (_, i) => ({
+        id: `domain-${i}`,
+        domain: `Domain ${i}`,
+        description: `desc ${i}`,
+        filePatterns: [],
+        provides: "",
+        consumes: "",
+      })),
+    };
+    const merged = mergeState(base, update);
+    expect(merged.domainAssignments.length).toBeLessThanOrEqual(20);
+  });
+
+  it("caps branchResults at 20", () => {
+    const update = {
+      branchResults: Array.from({ length: 25 }, (_, i) => ({
+        domainId: `d-${i}`,
+        domain: `Domain ${i}`,
+        filesWritten: [],
+        testsPassed: true,
+        testOutput: "",
+        errors: [],
+        fixAttempts: 0,
+        code: "",
+        durationMs: 100,
+      })),
+    };
+    const merged = mergeState(base, update);
+    expect(merged.branchResults.length).toBeLessThanOrEqual(20);
+    // Keeps most recent (newest results matter most)
+    expect(merged.branchResults[merged.branchResults.length - 1].domainId).toBe("d-24");
+  });
 });
 
 // ── Frozen snapshot tests ────────────────────────────────────────────

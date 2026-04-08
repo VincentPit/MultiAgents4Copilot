@@ -3,7 +3,7 @@
  */
 
 import * as vscode from "vscode";
-import { buildGraph, AGENT_DISPLAY, ProgressTracker, type AgentNode, type GraphResult } from "../../graph/builder.js";
+import { buildGraph, AGENT_DISPLAY, ProgressTracker, formatDurationShort, type AgentNode, type GraphResult } from "../../graph/builder.js";
 import { createInitialState, mergeState, type AgentState } from "../../graph/state.js";
 
 // The mock already returns a model from selectChatModels
@@ -666,5 +666,55 @@ describe("ProgressTracker", () => {
     expect(card).toContain("░");
 
     tracker.dispose();
+  });
+});
+
+// ── formatDurationShort tests ────────────────────────────────────────
+
+describe("formatDurationShort", () => {
+  it("formats sub-second as milliseconds", () => {
+    expect(formatDurationShort(42)).toBe("42ms");
+    expect(formatDurationShort(999)).toBe("999ms");
+  });
+
+  it("formats seconds with one decimal", () => {
+    expect(formatDurationShort(1000)).toBe("1.0s");
+    expect(formatDurationShort(3200)).toBe("3.2s");
+    expect(formatDurationShort(59_999)).toBe("60.0s");
+  });
+
+  it("formats minutes and seconds", () => {
+    expect(formatDurationShort(60_000)).toBe("1m 0s");
+    expect(formatDurationShort(90_000)).toBe("1m 30s");
+    expect(formatDurationShort(125_000)).toBe("2m 5s");
+  });
+});
+
+// ── Graph limits from security config tests ─────────────────────────
+
+describe("buildGraph — config-driven limits", () => {
+  it("reads error cap from security config (circuitBreaker.maxErrors * 2)", async () => {
+    // The default maxErrors is 5, so the error cap should be 10
+    let supervisorCalls = 0;
+    const nodes: Record<string, AgentNode> = {
+      supervisor: async () => {
+        supervisorCalls++;
+        return { nextAgent: "coder" };
+      },
+      coder: async () => {
+        throw new Error(`Error #${supervisorCalls}`);
+      },
+    };
+
+    const graph = buildGraph({ nodes, entryPoint: "supervisor", maxSteps: 100 });
+    const state = createInitialState("test config limits");
+    state.errors = Array.from({ length: 9 }, (_, i) => `pre-error-${i}`);
+    const stream = mockStream();
+    const result = await graph.run(state, mockModel, stream, mockToken());
+
+    // Should stop due to error cap (9 pre-seeded + at least 1 new = 10)
+    expect(result.state.errors.length).toBeGreaterThanOrEqual(10);
+    const mdCalls = (stream.markdown as jest.Mock).mock.calls.map((c: any[]) => c[0]);
+    expect(mdCalls.some((m: string) => m.includes("Too many errors"))).toBe(true);
   });
 });

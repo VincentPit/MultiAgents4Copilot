@@ -21,6 +21,15 @@ const MAX_ERRORS = 100;
 /** Maximum terminal results before oldest are evicted. */
 const MAX_TERMINAL_RESULTS = 50;
 
+/** Maximum plan steps (prevents runaway LLM-generated plans). */
+const MAX_PLAN_STEPS = 50;
+
+/** Maximum domain assignments in a single coder pool run. */
+const MAX_DOMAIN_ASSIGNMENTS = 20;
+
+/** Maximum branch results from Go worker pool. */
+const MAX_BRANCH_RESULTS = 20;
+
 /** Maximum length of any single string field (plan step, artifact, etc.). */
 const MAX_FIELD_LENGTH = 100_000;
 
@@ -290,6 +299,15 @@ export function mergeState(
   }
   if (merged.terminalResults.length > MAX_TERMINAL_RESULTS) {
     merged.terminalResults = merged.terminalResults.slice(-MAX_TERMINAL_RESULTS);
+  }
+  if (merged.plan.length > MAX_PLAN_STEPS) {
+    merged.plan = merged.plan.slice(0, MAX_PLAN_STEPS);
+  }
+  if (merged.domainAssignments.length > MAX_DOMAIN_ASSIGNMENTS) {
+    merged.domainAssignments = merged.domainAssignments.slice(0, MAX_DOMAIN_ASSIGNMENTS);
+  }
+  if (merged.branchResults.length > MAX_BRANCH_RESULTS) {
+    merged.branchResults = merged.branchResults.slice(-MAX_BRANCH_RESULTS);
   }
 
   // Clamp overly long string fields

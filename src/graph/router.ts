@@ -17,7 +17,7 @@ export interface RouteResult {
   done: boolean;         // true = graph should finish
 }
 
-const VALID_AGENTS = new Set([
+export const VALID_AGENTS: ReadonlySet<string> = new Set([
   "planner", "coder", "coder_pool", "reviewer",
   "ui_designer", "test_gen", "integrator",
 ]);
@@ -35,7 +35,7 @@ const VALID_AGENTS = new Set([
 export function routeSupervisor(state: AgentState): RouteResult {
   // Check for explicit parallel dispatch via pendingAgents
   if (state.pendingAgents.length > 0) {
-    const valid = state.pendingAgents.filter(a => VALID_AGENTS.has(a));
+    const valid = [...new Set(state.pendingAgents)].filter(a => VALID_AGENTS.has(a));
     if (valid.length > 1) {
       logger.route("supervisor", `parallel: [${valid.join(", ")}]`);
       return { agents: valid, parallel: true, done: false };
@@ -56,8 +56,8 @@ export function routeSupervisor(state: AgentState): RouteResult {
     return { agents: [], parallel: false, done: true };
   }
 
-  // Validate and collect agents
-  const agents = parts.filter(a => VALID_AGENTS.has(a));
+  // Validate and collect agents (deduplicate)
+  const agents = [...new Set(parts.filter(a => VALID_AGENTS.has(a)))];
 
   if (agents.length === 0) {
     logger.route("supervisor", "__end__ (no valid agents)");
