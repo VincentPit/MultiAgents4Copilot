@@ -20,14 +20,19 @@ import { AgentOutputManager } from "../utils/agentOutputManager";
 /** Default per-agent timeout (ms) — used only for progress bar display width. */
 const DEFAULT_AGENT_DISPLAY_MS = 120_000;
 
-/** Wall-clock timeout for the entire graph run (ms). */
-const GRAPH_WALL_CLOCK_MS = 1_800_000; // 30 minutes
-
-/** Maximum accumulated errors before force-finishing. */
-const MAX_ERROR_COUNT = 10;
-
 /** Maximum state size in characters (rough JSON.stringify length). */
 const MAX_STATE_SIZE_CHARS = 2_000_000; // ~2 MB
+
+/** Resolve graph-level limits from the central security config. */
+function getGraphLimits() {
+  const cfg = getSecurityConfig();
+  return {
+    /** Wall-clock timeout for the entire graph run (ms). */
+    wallClockMs: cfg.circuitBreaker.cooldownMs * 30, // 30 × cooldown ≈ 30 min
+    /** Maximum accumulated errors before force-finishing. */
+    maxErrorCount: cfg.circuitBreaker.maxErrors * 2,  // 2× circuit breaker threshold
+  };
+}
 
 /** An agent node: receives state + VS Code LM + chat stream, returns a partial state update. */
 export type AgentNode = (
@@ -258,7 +263,7 @@ function renderMiniBar(elapsedMs: number, timeoutMs: number): string {
 }
 
 /** Format duration as compact string (e.g., "3.2s", "1m 23s"). */
-function formatDurationShort(ms: number): string {
+export function formatDurationShort(ms: number): string {
   if (ms < 1000) { return `${ms}ms`; }
   if (ms < 60_000) { return `${(ms / 1000).toFixed(1)}s`; }
   const m = Math.floor(ms / 60_000);
@@ -412,6 +417,7 @@ export function buildGraph(config: GraphConfig) {
     let steps = 0;
     const agentRuns: AgentRun[] = [];
     const graphStart = Date.now();
+    const { wallClockMs, maxErrorCount } = getGraphLimits();
 
     // ── Live progress tracker ──
     const tracker = new ProgressTracker(stream, graphStart);
@@ -425,15 +431,15 @@ export function buildGraph(config: GraphConfig) {
 
     while (currentNode !== "__end__" && steps < maxSteps) {
       // ── Wall-clock timeout ──
-      if (Date.now() - graphStart > GRAPH_WALL_CLOCK_MS) {
-        logger.warn("graph", `Wall-clock timeout reached (${GRAPH_WALL_CLOCK_MS}ms)`);
+      if (Date.now() - graphStart > wallClockMs) {
+        logger.warn("graph", `Wall-clock timeout reached (${wallClockMs}ms)`);
         stream.markdown(`\n\n> ⚠️ Reached wall-clock time limit. Stopping.\n`);
         state.status = "completed";
         break;
       }
 
       // ── Error accumulation cap ──
-      if ((state.errors?.length ?? 0) >= MAX_ERROR_COUNT) {
+      if ((state.errors?.length ?? 0) >= maxErrorCount) {
         logger.warn("graph", `Error accumulation cap reached (${state.errors.length} errors)`);
         stream.markdown(`\n\n> ⚠️ Too many errors accumulated (${state.errors.length}). Stopping.\n`);
         state.status = "error";
@@ -717,6 +723,11 @@ function mergePartials(
   // Terminal results: concat
   if (a.terminalResults || b.terminalResults) {
     merged.terminalResults = [...(a.terminalResults ?? []), ...(b.terminalResults ?? [])];
+  }
+
+  // Branch results: concat (parallel agents may each produce results)
+  if (a.branchResults || b.branchResults) {
+    merged.branchResults = [...(a.branchResults ?? []), ...(b.branchResults ?? [])];
   }
 
   return merged;

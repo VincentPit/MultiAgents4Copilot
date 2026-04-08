@@ -9,7 +9,7 @@
  *   - routeSupervisor with edge-case inputs
  */
 
-import { routeSupervisor, routeReviewer, routeFromPlan, type RouteResult } from "../../graph/router.js";
+import { routeSupervisor, routeReviewer, routeFromPlan, VALID_AGENTS, type RouteResult } from "../../graph/router.js";
 import { createInitialState, type AgentState } from "../../graph/state.js";
 
 describe("routeFromPlan — edge cases", () => {
@@ -116,12 +116,12 @@ describe("routeSupervisor — additional edge cases", () => {
     expect(result.done).toBe(true);
   });
 
-  it("deduplicates agents in comma-separated list (if doubled)", () => {
+  it("deduplicates agents in comma-separated list", () => {
     state.nextAgent = "coder,coder,test_gen";
     const result = routeSupervisor(state);
-    // The router doesn't deduplicate — it returns all valid ones
-    // This is a documentation of current behavior
-    expect(result.agents.filter(a => a === "coder").length).toBe(2);
+    // Duplicates are removed — only unique agents remain
+    expect(result.agents).toEqual(["coder", "test_gen"]);
+    expect(result.parallel).toBe(true);
   });
 
   it("handles pendingAgents with single valid + invalid agents", () => {

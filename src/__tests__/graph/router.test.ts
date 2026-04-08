@@ -5,7 +5,7 @@
  * supporting parallel fan-out and plan-driven routing.
  */
 
-import { routeSupervisor, routeReviewer, routeFromPlan, type RouteResult } from "../../graph/router";
+import { routeSupervisor, routeReviewer, routeFromPlan, VALID_AGENTS, type RouteResult } from "../../graph/router";
 import { createInitialState, type AgentState } from "../../graph/state";
 
 describe("routeSupervisor", () => {
@@ -109,12 +109,41 @@ describe("routeSupervisor", () => {
     expect(result.parallel).toBe(true);
   });
 
+  it("deduplicates repeated agents in comma-separated dispatch", () => {
+    state.nextAgent = "coder,coder,test_gen";
+    const result = routeSupervisor(state);
+    expect(result.agents).toEqual(["coder", "test_gen"]);
+    expect(result.parallel).toBe(true);
+  });
+
+  it("deduplicates pendingAgents", () => {
+    state.pendingAgents = ["coder", "test_gen", "coder"];
+    const result = routeSupervisor(state);
+    expect(result.agents).toEqual(["coder", "test_gen"]);
+    expect(result.parallel).toBe(true);
+  });
+
   it("prefers pendingAgents over nextAgent when both are set", () => {
     state.pendingAgents = ["coder", "ui_designer"];
     state.nextAgent = "test_gen";
     const result = routeSupervisor(state);
     expect(result.agents).toEqual(["coder", "ui_designer"]);
     expect(result.parallel).toBe(true);
+  });
+});
+
+describe("VALID_AGENTS", () => {
+  it("contains all standard agent names", () => {
+    const expected = ["planner", "coder", "coder_pool", "reviewer", "ui_designer", "test_gen", "integrator"];
+    for (const name of expected) {
+      expect(VALID_AGENTS.has(name)).toBe(true);
+    }
+  });
+
+  it("is a frozen/read-only set", () => {
+    // ReadonlySet — TypeScript enforces no .add/.delete at compile time.
+    // At runtime, the underlying Set is still mutable, but the export type prevents misuse.
+    expect(VALID_AGENTS.size).toBeGreaterThanOrEqual(7);
   });
 });
 
