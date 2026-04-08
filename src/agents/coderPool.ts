@@ -48,7 +48,7 @@ import {
 // limit. Without this, N simultaneous domain coders cause throttling
 // and timeouts.
 
-class Semaphore {
+export class Semaphore {
   private queue: (() => void)[] = [];
   private running = 0;
   constructor(private readonly max: number) {}
@@ -70,10 +70,10 @@ class Semaphore {
 }
 
 /** Max concurrent LLM calls across domain coders. */
-const LLM_CONCURRENCY = 2;
+export const LLM_CONCURRENCY = 2;
 
 /** Hard ceiling on domain count — prevents runaway decomposition. */
-const MAX_DOMAINS = 6;
+export const MAX_DOMAINS = 6;
 
 // ── Prompts ──────────────────────────────────────────────────────────
 
@@ -1028,7 +1028,7 @@ async function runWithJSFallback(
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-function formatMs(ms: number): string {
+export function formatMs(ms: number): string {
   if (ms < 1000) {
     return `${ms}ms`;
   }

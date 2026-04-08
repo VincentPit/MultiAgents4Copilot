@@ -12,6 +12,9 @@ import { AgentOutputManager } from "../utils/agentOutputManager";
 import { showBatchDiffs } from "../utils/diffViewer";
 import type { TerminalResult } from "../graph/state";
 
+/** Max chars kept for capped test response in state. */
+export const MAX_TEST_RESPONSE_CHARS = 6000;
+
 const SYSTEM_PROMPT = `You are a senior test engineer for automated testing.
 Generate thorough, production-quality tests for the provided code.
 
@@ -146,8 +149,8 @@ export async function testGen(
     stream.markdown(`\n> ⚠️ Failed to run test commands: ${err.message}\n`);
   }
 
-  const cappedResponse = response.length > 6000
-    ? response.slice(0, 6000) + "\n[... tests truncated in state]"
+  const cappedResponse = response.length > MAX_TEST_RESPONSE_CHARS
+    ? response.slice(0, MAX_TEST_RESPONSE_CHARS) + "\n[... tests truncated in state]"
     : response;
 
   // ── End the output channel run ──

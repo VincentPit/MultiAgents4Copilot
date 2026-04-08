@@ -2,7 +2,7 @@
  * Tests for src/agents/coderPool.ts — domain decomposition & parallel coder pool.
  */
 
-import { parseDomainAssignments } from "../../agents/coderPool";
+import { parseDomainAssignments, Semaphore, LLM_CONCURRENCY, MAX_DOMAINS, formatMs } from "../../agents/coderPool";
 import type { DomainAssignment } from "../../graph/state";
 
 describe("parseDomainAssignments", () => {
@@ -140,5 +140,90 @@ describe("DomainAssignment type", () => {
     expect(assignment.filePatterns).toHaveLength(2);
     expect(assignment.provides).toContain("UserController");
     expect(assignment.consumes).toContain("data-layer");
+  });
+});
+
+describe("Semaphore", () => {
+  it("allows up to max concurrent acquisitions", async () => {
+    const sem = new Semaphore(2);
+    let running = 0;
+    let maxRunning = 0;
+
+    const tasks = Array.from({ length: 5 }, async (_, i) => {
+      await sem.acquire();
+      running++;
+      maxRunning = Math.max(maxRunning, running);
+      // Simulate work
+      await new Promise(r => setTimeout(r, 10));
+      running--;
+      sem.release();
+    });
+
+    await Promise.all(tasks);
+    expect(maxRunning).toBeLessThanOrEqual(2);
+  });
+
+  it("processes all tasks even with limited concurrency", async () => {
+    const sem = new Semaphore(1);
+    const completed: number[] = [];
+
+    const tasks = Array.from({ length: 4 }, async (_, i) => {
+      await sem.acquire();
+      completed.push(i);
+      sem.release();
+    });
+
+    await Promise.all(tasks);
+    expect(completed).toHaveLength(4);
+  });
+
+  it("acquire resolves immediately when under max", async () => {
+    const sem = new Semaphore(3);
+    await sem.acquire();
+    await sem.acquire();
+    // Third should also resolve immediately
+    await sem.acquire();
+    sem.release();
+    sem.release();
+    sem.release();
+  });
+});
+
+describe("coderPool constants", () => {
+  it("LLM_CONCURRENCY is a positive integer", () => {
+    expect(LLM_CONCURRENCY).toBe(2);
+    expect(Number.isInteger(LLM_CONCURRENCY)).toBe(true);
+  });
+
+  it("MAX_DOMAINS is a positive integer", () => {
+    expect(MAX_DOMAINS).toBe(6);
+    expect(Number.isInteger(MAX_DOMAINS)).toBe(true);
+  });
+
+  it("MAX_DOMAINS is large enough for typical projects", () => {
+    expect(MAX_DOMAINS).toBeGreaterThanOrEqual(2);
+  });
+
+  it("MAX_DOMAINS is small enough to prevent runaway decomposition", () => {
+    expect(MAX_DOMAINS).toBeLessThanOrEqual(10);
+  });
+});
+
+describe("formatMs", () => {
+  it("formats sub-second durations in milliseconds", () => {
+    expect(formatMs(500)).toBe("500ms");
+    expect(formatMs(0)).toBe("0ms");
+    expect(formatMs(999)).toBe("999ms");
+  });
+
+  it("formats multi-second durations in seconds", () => {
+    expect(formatMs(1000)).toBe("1.0s");
+    expect(formatMs(1500)).toBe("1.5s");
+    expect(formatMs(60000)).toBe("60.0s");
+  });
+
+  it("handles exact boundaries", () => {
+    expect(formatMs(999)).toBe("999ms");
+    expect(formatMs(1000)).toBe("1.0s");
   });
 });

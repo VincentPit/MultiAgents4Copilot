@@ -18,7 +18,7 @@ import * as vscode from "vscode";
 import { logger } from "./logger";
 
 /** Display metadata for each agent channel. */
-const AGENT_CHANNEL_CONFIG: Record<string, { icon: string; label: string }> = {
+export const AGENT_CHANNEL_CONFIG: Record<string, { icon: string; label: string }> = {
   supervisor:  { icon: "🧠", label: "Supervisor" },
   planner:     { icon: "📋", label: "Planner" },
   coder:       { icon: "💻", label: "Coder" },
@@ -30,7 +30,7 @@ const AGENT_CHANNEL_CONFIG: Record<string, { icon: string; label: string }> = {
 };
 
 /** Escape HTML special characters for safe webview rendering. */
-function escapeHtml(text: string): string {
+export function escapeHtml(text: string): string {
   return text
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -52,6 +52,9 @@ export class AgentOutputManager {
   private dashboardPanel: vscode.WebviewPanel | null = null;
   private dashboardDomains: Array<{ id: string; domain: string }> = [];
   private dashboardLogs: Map<string, string[]> = new Map();
+
+  /** Max log lines retained per domain in the dashboard. */
+  static readonly MAX_DASHBOARD_LOGS = 500;
 
   private constructor() {}
 
@@ -250,7 +253,13 @@ export class AgentOutputManager {
   private appendToDashboard(domainId: string, text: string): void {
     if (!this.dashboardPanel) { return; }
     const logs = this.dashboardLogs.get(domainId);
-    if (logs) { logs.push(text); }
+    if (logs) {
+      logs.push(text);
+      // Evict oldest log lines when cap is exceeded
+      while (logs.length > AgentOutputManager.MAX_DASHBOARD_LOGS) {
+        logs.shift();
+      }
+    }
     this.dashboardPanel.webview.postMessage({ type: "log", domainId, text });
   }
 
