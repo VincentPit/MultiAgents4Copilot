@@ -3,7 +3,14 @@
  */
 
 import * as vscode from "vscode";
-import { MultiCoderViewManager } from "../../utils/multiCoderView";
+import {
+  MultiCoderViewManager,
+  escapeHtml,
+  formatMs,
+  progressPercent,
+  viewColumnForIndex,
+  MAX_LOGS_PER_CODER,
+} from "../../utils/multiCoderView";
 
 // Helper to get a fresh singleton for each test
 function resetManager(): MultiCoderViewManager {
@@ -317,5 +324,92 @@ describe("MultiCoderViewManager", () => {
     expect(html).toContain("Backend API");
     expect(html).toContain("Data Layer");
     expect(html).toContain("Parallel Coders");
+  });
+});
+
+// ── Exported helpers ─────────────────────────────────────────────────
+
+describe("escapeHtml", () => {
+  it("escapes HTML special chars", () => {
+    expect(escapeHtml("<b>\"hi\" & bye</b>")).toBe(
+      "&lt;b&gt;&quot;hi&quot; &amp; bye&lt;/b&gt;"
+    );
+  });
+
+  it("returns empty string for empty input", () => {
+    expect(escapeHtml("")).toBe("");
+  });
+
+  it("does not modify safe strings", () => {
+    expect(escapeHtml("Hello 123")).toBe("Hello 123");
+  });
+});
+
+describe("formatMs", () => {
+  it("formats sub-second as ms", () => {
+    expect(formatMs(42)).toBe("42ms");
+  });
+
+  it("formats multi-second as s", () => {
+    expect(formatMs(2500)).toBe("2.5s");
+  });
+
+  it("boundary at 1000ms", () => {
+    expect(formatMs(999)).toBe("999ms");
+    expect(formatMs(1000)).toBe("1.0s");
+  });
+});
+
+describe("progressPercent", () => {
+  it("queued returns 10", () => {
+    expect(progressPercent("queued")).toBe(10);
+  });
+
+  it("coding returns 40", () => {
+    expect(progressPercent("coding")).toBe(40);
+  });
+
+  it("writing returns 65", () => {
+    expect(progressPercent("writing")).toBe(65);
+  });
+
+  it("testing returns 85", () => {
+    expect(progressPercent("testing")).toBe(85);
+  });
+
+  it("done returns 100", () => {
+    expect(progressPercent("done")).toBe(100);
+  });
+
+  it("error returns 100", () => {
+    expect(progressPercent("error")).toBe(100);
+  });
+});
+
+describe("viewColumnForIndex", () => {
+  it("1-2 coders use column Two", () => {
+    expect(viewColumnForIndex(0, 1)).toBe(vscode.ViewColumn.Two);
+    expect(viewColumnForIndex(0, 2)).toBe(vscode.ViewColumn.Two);
+    expect(viewColumnForIndex(1, 2)).toBe(vscode.ViewColumn.Two);
+  });
+
+  it("3-4 coders split across Two and Three", () => {
+    expect(viewColumnForIndex(0, 3)).toBe(vscode.ViewColumn.Two);
+    expect(viewColumnForIndex(1, 3)).toBe(vscode.ViewColumn.Two);
+    expect(viewColumnForIndex(2, 3)).toBe(vscode.ViewColumn.Three);
+  });
+
+  it("5-6 coders distribute across Three columns", () => {
+    expect(viewColumnForIndex(0, 6)).toBe(vscode.ViewColumn.Two);
+    expect(viewColumnForIndex(1, 6)).toBe(vscode.ViewColumn.Three);
+    expect(viewColumnForIndex(2, 6)).toBe(vscode.ViewColumn.Four);
+    expect(viewColumnForIndex(3, 6)).toBe(vscode.ViewColumn.Two);
+  });
+});
+
+describe("MAX_LOGS_PER_CODER", () => {
+  it("is a positive integer", () => {
+    expect(MAX_LOGS_PER_CODER).toBe(500);
+    expect(Number.isInteger(MAX_LOGS_PER_CODER)).toBe(true);
   });
 });

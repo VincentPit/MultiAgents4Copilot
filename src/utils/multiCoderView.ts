@@ -27,7 +27,7 @@ interface CoderDomain {
   filePatterns?: string[];
 }
 
-type CoderStatus = "queued" | "coding" | "writing" | "testing" | "done" | "error";
+export type CoderStatus = "queued" | "coding" | "writing" | "testing" | "done" | "error";
 
 interface CoderPanelState {
   domain: CoderDomain;
@@ -44,7 +44,10 @@ interface CoderPanelState {
 
 // ── HTML helpers ─────────────────────────────────────────────────────
 
-function escapeHtml(text: string): string {
+/** Maximum log lines retained per coder panel. */
+export const MAX_LOGS_PER_CODER = 500;
+
+export function escapeHtml(text: string): string {
   return text
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -375,7 +378,7 @@ function buildCoderPanelHtml(state: CoderPanelState): string {
 </html>`;
 }
 
-function progressPercent(status: CoderStatus): number {
+export function progressPercent(status: CoderStatus): number {
   switch (status) {
     case "queued":  return 10;
     case "coding":  return 40;
@@ -386,7 +389,7 @@ function progressPercent(status: CoderStatus): number {
   }
 }
 
-function formatMs(ms: number): string {
+export function formatMs(ms: number): string {
   if (ms < 1000) { return `${ms}ms`; }
   return `${(ms / 1000).toFixed(1)}s`;
 }
@@ -397,7 +400,7 @@ function formatMs(ms: number): string {
  * Distribute N panels across available editor columns.
  * Uses columns Two and Three for coder panels, One for overview.
  */
-function viewColumnForIndex(index: number, total: number): vscode.ViewColumn {
+export function viewColumnForIndex(index: number, total: number): vscode.ViewColumn {
   if (total <= 2) {
     // 1-2 coders: stack in column Two
     return vscode.ViewColumn.Two;
@@ -497,6 +500,10 @@ export class MultiCoderViewManager {
     if (!state) { return; }
 
     state.logs.push(text);
+    // Evict oldest log lines when cap is exceeded
+    while (state.logs.length > MAX_LOGS_PER_CODER) {
+      state.logs.shift();
+    }
     // Send incremental log to the panel (avoids full re-render)
     state.panel.webview.postMessage({ type: "log", text });
   }

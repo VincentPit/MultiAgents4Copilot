@@ -26,6 +26,12 @@ import {
 } from "../utils/fileReader";
 import type { TerminalResult } from "../graph/state";
 
+/** Max fix-retry attempts before giving up on quality gate failures. */
+export const CODER_MAX_FIX_RETRIES = 2;
+
+/** Max chars kept in state for capped LLM response. */
+export const MAX_CODER_RESPONSE_CHARS = 6000;
+
 const SYSTEM_PROMPT = `You are the Coder agent — an expert software engineer who writes real files.
 
 CRITICAL FORMAT RULES — follow these exactly so your code is applied to the workspace:
@@ -188,7 +194,7 @@ export async function coderNode(
   // ── Quality Gate: build → lint → test → self-review ─────────────────
   // Like a real engineer's pre-submit pipeline: code must pass ALL
   // automated checks before it goes to peer review.
-  const MAX_FIX_RETRIES = 2;
+  const MAX_FIX_RETRIES = CODER_MAX_FIX_RETRIES;
   let qaReport: QualityGateResult | null = null;
   let lastResponse = response;
 
@@ -320,8 +326,8 @@ export async function coderNode(
     stream.markdown(`\n> ⚠️ Failed to run terminal commands: ${errMsg}\n`);
   }
 
-  const cappedResponse = lastResponse.length > 6000
-    ? lastResponse.slice(0, 6000) + "\n[... code truncated in state]"
+  const cappedResponse = lastResponse.length > MAX_CODER_RESPONSE_CHARS
+    ? lastResponse.slice(0, MAX_CODER_RESPONSE_CHARS) + "\n[... code truncated in state]"
     : lastResponse;
 
   // ── End the output channel run ──

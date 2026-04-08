@@ -50,7 +50,7 @@ interface GoMessage {
 // ── Go binary resolution ─────────────────────────────────────────────
 
 /** Find the Go worker binary — compiled binary or compile on-demand. */
-async function resolveGoWorkerBinary(extensionPath: string): Promise<string | null> {
+export async function resolveGoWorkerBinary(extensionPath: string): Promise<string | null> {
   // Check for pre-compiled binary
   const binaryName = process.platform === "win32" ? "go-worker.exe" : "go-worker";
   const precompiled = path.join(extensionPath, "out", binaryName);
