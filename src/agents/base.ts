@@ -239,6 +239,7 @@ export async function callModel(
       } else {
         const errMsg = err instanceof Error ? err.message : String(err);
         const is400 = errMsg.includes("400") || errMsg.includes("Bad Request");
+        const isCanceled = errMsg === "Canceled" || errMsg.includes("Canceled");
         // Log comprehensive error details for debugging
         const errObj = err as any;
         const errDetails = [
@@ -248,6 +249,12 @@ export async function callModel(
           `type=${errObj?.constructor?.name ?? typeof err}`,
         ].filter(Boolean).join(", ");
         logger.warn(agentName, `Attempt ${attempt}/${MAX_RETRIES} failed: ${errDetails}`);
+
+        // If token is already canceled, all future attempts will fail immediately
+        if (isCanceled && token.isCancellationRequested) {
+          logger.warn(agentName, "CancellationToken fired — skipping remaining retries");
+          break;
+        }
 
         // If 400 = context too large, aggressively truncate
         if (is400) {
@@ -282,34 +289,47 @@ export async function callModel(
   // All retries exhausted — try a fallback model
   logger.error(agentName, `All ${MAX_RETRIES} attempts failed, trying fallback model`);
 
-  for (const fallback of FALLBACK_ORDER) {
-    const [fbModel] = await vscode.lm.selectChatModels({
-      vendor: fallback.vendor,
-      family: fallback.family,
-    });
-    if (fbModel && fbModel !== model) {
-      try {
-        logger.fallback(agentName, String(lastError), fallback.label);
-        if (stream) {
-          stream.markdown(`\n\n> ⚠️ Primary model failed — falling back to **${fallback.label}**\n\n`);
-        }
-        // Also apply truncation for the fallback attempt
-        const fbBudget = safeBudget(fbModel);
-        const fbMessages = truncateMessages([...messages], fbBudget);
-        logger.info(agentName, `Fallback: sending ${fbMessages.length} msgs, budget ~${fbBudget} tokens`);
-        const response = await fbModel.sendRequest(fbMessages, {}, token);
-        const chunks: string[] = [];
-        for await (const chunk of response.text) {
-          chunks.push(chunk);
-          if (outputSink) {
-            outputSink.append(chunk);
-          } else if (stream) {
-            stream.markdown(chunk);
+  // If the token is already canceled, fallback calls will also fail immediately
+  if (token.isCancellationRequested) {
+    logger.warn(agentName, "CancellationToken already fired — skipping fallback models");
+  } else {
+    // Resolve the primary model's family so we skip same-model fallbacks
+    const primaryFamily = model.family ?? model.id ?? "";
+
+    for (const fallback of FALLBACK_ORDER) {
+      // Skip if this fallback is the same model family we already tried
+      if (primaryFamily.includes(fallback.family) || fallback.family.includes(primaryFamily)) {
+        logger.info(agentName, `Skipping fallback ${fallback.label} — same as primary`);
+        continue;
+      }
+      const [fbModel] = await vscode.lm.selectChatModels({
+        vendor: fallback.vendor,
+        family: fallback.family,
+      });
+      if (fbModel) {
+        try {
+          logger.fallback(agentName, String(lastError), fallback.label);
+          if (stream) {
+            stream.markdown(`\n\n> ⚠️ Primary model failed — falling back to **${fallback.label}**\n\n`);
           }
+          // Also apply truncation for the fallback attempt
+          const fbBudget = safeBudget(fbModel);
+          const fbMessages = truncateMessages([...messages], fbBudget);
+          logger.info(agentName, `Fallback: sending ${fbMessages.length} msgs, budget ~${fbBudget} tokens`);
+          const response = await fbModel.sendRequest(fbMessages, {}, token);
+          const chunks: string[] = [];
+          for await (const chunk of response.text) {
+            chunks.push(chunk);
+            if (outputSink) {
+              outputSink.append(chunk);
+            } else if (stream) {
+              stream.markdown(chunk);
+            }
+          }
+          return chunks.join("");
+        } catch {
+          continue; // try next fallback
         }
-        return chunks.join("");
-      } catch {
-        continue; // try next fallback
       }
     }
   }

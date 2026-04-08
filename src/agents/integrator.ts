@@ -41,6 +41,10 @@ import {
 } from "../utils/qualityGate";
 import { AgentOutputManager } from "../utils/agentOutputManager";
 import { showBatchDiffs } from "../utils/diffViewer";
+import {
+  readWrittenFiles,
+  formatFilesForLLM,
+} from "../utils/fileReader";
 
 const SYSTEM_PROMPT = `You are the Integration Engineer — a Staff-level tech lead who merges
 the parallel output of multiple domain engineers into a cohesive codebase
@@ -191,6 +195,30 @@ export async function integratorNode(
   if (priorQualityErrors) {
     sysPrompt += `\n\n## ⚠️ EXISTING QUALITY ISSUES FROM CODERS\n` +
       `The domain coders left these unresolved quality issues:\n\n${capContext(priorQualityErrors, 5_000)}`;
+  }
+
+  // ── Read actual on-disk files written by domain coders ──
+  // This gives the integrator the REAL current file state, not just
+  // truncated LLM-output summaries from artifacts.
+  const allWrittenPaths = branchResults.flatMap(r => r.filesWritten);
+  if (allWrittenPaths.length > 0) {
+    try {
+      const diskFiles = await readWrittenFiles(allWrittenPaths, {
+        maxFiles: 50,
+        maxCharsPerFile: 6_000,
+        maxTotalChars: 80_000,
+      });
+      if (diskFiles.length > 0) {
+        const diskContext = formatFilesForLLM(
+          diskFiles,
+          "ACTUAL FILES ON DISK (current state after domain coders wrote)",
+        );
+        sysPrompt += `\n\n${diskContext}`;
+        logger.info("integrator", `Injected ${diskFiles.length} on-disk file(s) into prompt`);
+      }
+    } catch (err: any) {
+      logger.warn("integrator", `Failed to read written files: ${err?.message}`);
+    }
   }
 
   const lastUserContent =

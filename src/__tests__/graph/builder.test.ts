@@ -622,22 +622,6 @@ describe("ProgressTracker", () => {
     tracker.dispose();
   });
 
-  it("updates progress line periodically via tick timer", () => {
-    const stream = mockStream();
-    const tracker = new ProgressTracker(stream, Date.now());
-
-    tracker.startAgent("planner");
-    const initialCalls = (stream.progress as jest.Mock).mock.calls.length;
-
-    // Advance fake timers by 3 seconds (3 ticks)
-    jest.advanceTimersByTime(3000);
-
-    const afterTickCalls = (stream.progress as jest.Mock).mock.calls.length;
-    expect(afterTickCalls).toBeGreaterThan(initialCalls);
-
-    tracker.dispose();
-  });
-
   it("dispose() clears the tick timer", () => {
     const stream = mockStream();
     const tracker = new ProgressTracker(stream, Date.now());

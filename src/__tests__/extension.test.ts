@@ -78,6 +78,15 @@ describe("deactivate", () => {
   it("should not throw", () => {
     expect(() => deactivate()).not.toThrow();
   });
+
+  it("disposes MultiCoderViewManager", () => {
+    const { MultiCoderViewManager } = require("../utils/multiCoderView");
+    const instance = MultiCoderViewManager.getInstance();
+    const disposeSpy = jest.spyOn(instance, "dispose");
+    deactivate();
+    expect(disposeSpy).toHaveBeenCalled();
+    disposeSpy.mockRestore();
+  });
 });
 
 describe("chat handler", () => {

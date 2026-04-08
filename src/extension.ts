@@ -27,6 +27,7 @@ import { runIntegrityCheck, type IntegrityReport } from "./utils/integrity";
 import { registerExtensionRoot } from "./utils/selfProtection";
 import { registerDiffProvider, clearDiffStore } from "./utils/diffViewer";
 import { AgentOutputManager } from "./utils/agentOutputManager";
+import { MultiCoderViewManager } from "./utils/multiCoderView";
 
 const PARTICIPANT_ID = "multi-agent-copilot.team";
 
@@ -424,6 +425,7 @@ function formatDuration(ms: number): string {
 
 export function deactivate() {
   AgentOutputManager.getInstance().dispose();
+  MultiCoderViewManager.getInstance().dispose();
   clearDiffStore();
   logger.dispose();
 }

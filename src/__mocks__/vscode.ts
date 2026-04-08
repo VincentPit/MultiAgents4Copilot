@@ -60,6 +60,15 @@ const window = {
     appendLine: jest.fn(),
     clear: jest.fn(),
   }),
+  createWebviewPanel: jest.fn().mockImplementation(() => ({
+    webview: {
+      html: "",
+      postMessage: jest.fn().mockResolvedValue(true),
+    },
+    onDidDispose: jest.fn(),
+    dispose: jest.fn(),
+    visible: true,
+  })),
   activeTextEditor: undefined,
   tabGroups: { all: [] },
 };

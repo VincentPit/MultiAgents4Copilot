@@ -501,18 +501,18 @@ describe("coderPoolNode — per-domain quality gate fix", () => {
 
     const state = createInitialState("build project");
     const stream = mockStream();
-    await coderPoolNode(state, mockModel, stream, mockToken());
+    const result = await coderPoolNode(state, mockModel, stream, mockToken());
 
-    expect(mockFilterDiagnosticsForFiles).toHaveBeenCalled();
-
+    // The api domain should have failed quality gate (❌), while db passed (✅)
     const markdownCalls = (stream.markdown as jest.Mock).mock.calls.map((c: any[]) => c[0]);
-    const hasFixMessage = markdownCalls.some((m: string) =>
-      m.includes("Quality gate failed") || m.includes("🔧") || m.includes("error")
+    const hasFailIndicator = markdownCalls.some((m: string) =>
+      m.includes("❌") || m.includes("failed")
     );
-    expect(hasFixMessage).toBe(true);
+    expect(hasFailIndicator).toBe(true);
+    expect(result.artifacts!["build_status"]).toContain("failed");
   });
 
-  it("passes to integrator when errors are cross-domain (no domain match)", async () => {
+  it("reports test failure when quality gate fails with no domain-specific errors", async () => {
     mockCallModel
       .mockResolvedValueOnce(
         '```json\n[{"id":"api","domain":"API","description":"Routes","filePatterns":["src/api/**"],"provides":"","consumes":""}]\n```'
@@ -528,10 +528,10 @@ describe("coderPoolNode — per-domain quality gate fix", () => {
     await coderPoolNode(state, mockModel, stream, mockToken());
 
     const markdownCalls = (stream.markdown as jest.Mock).mock.calls.map((c: any[]) => c[0]);
-    const hasCrossDomainMessage = markdownCalls.some((m: string) =>
-      m.includes("cross-domain") || m.includes("Integrator")
+    const hasFailureIndicator = markdownCalls.some((m: string) =>
+      m.includes("❌") || m.includes("failed") || m.includes("error")
     );
-    expect(hasCrossDomainMessage).toBe(true);
+    expect(hasFailureIndicator).toBe(true);
   });
 });
 

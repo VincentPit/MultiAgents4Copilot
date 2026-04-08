@@ -157,6 +157,41 @@ const SELF_MODIFICATION_PATTERNS: RegExp[] = [
   /\bnode\b.*-e\b.*(?:writeFile|appendFile).*\bsrc\//,
 ];
 
+/**
+ * Commands that are safe to auto-approve without user consent.
+ * These are standard project setup commands that don't have side-effects
+ * beyond the workspace directory.
+ */
+const AUTO_APPROVE_PATTERNS: RegExp[] = [
+  /^npm\s+(install|i|ci)\b/,               // npm install
+  /^npm\s+init\b/,                          // npm init
+  /^npx\s+create-/,                         // npx create-next-app, etc.
+  /^yarn\s+(install|add)\b/,                // yarn install
+  /^pnpm\s+(install|add|i)\b/,              // pnpm install
+  /^pip\s+install\b/,                       // pip install
+  /^pip3\s+install\b/,                      // pip3 install
+  /^python3?\s+-m\s+pip\s+install\b/,       // python -m pip install
+  /^poetry\s+(install|add)\b/,              // poetry install
+  /^bundle\s+install\b/,                    // bundle install
+  /^cargo\s+(build|init)\b/,                // cargo build
+  /^go\s+(mod\s+(init|tidy)|get)\b/,        // go mod init, go get
+  /^gradle\s+(build|init)\b/,               // gradle build
+  /^mvn\s+(install|compile|package)\b/,     // mvn install
+  /^mkdir\s+/,                              // mkdir
+  /^touch\s+/,                              // touch
+  /^cp\s+/,                                 // cp (within workspace)
+  /^chmod\s+/,                              // chmod
+  /^cd\s+/,                                 // cd
+  /^npx\s+prisma\s+(generate|init)\b/,      // prisma generate
+  /^npx\s+tailwindcss\s+init\b/,            // tailwind init
+];
+
+/** Check if a command matches the auto-approve list. */
+function isAutoApprovable(command: string): boolean {
+  const trimmed = command.trim();
+  return AUTO_APPROVE_PATTERNS.some(pattern => pattern.test(trimmed));
+}
+
 /** Check if a command is blocked for safety. */
 function isBlocked(command: string): boolean {
   // Length check first
@@ -340,6 +375,7 @@ function truncateOutput(output: string): string {
 export async function runCommandsFromOutput(
   llmOutput: string,
   stream: vscode.ChatResponseStream,
+  options?: { autoApprove?: boolean },
 ): Promise<RunResult> {
   const result: RunResult = { executed: [], skipped: [] };
 
@@ -373,8 +409,43 @@ export async function runCommandsFromOutput(
     return result;
   }
 
-  // Ask the user for consent
-  const { approved, declined } = await requestCommandConsent(safeCommands);
+  // Auto-approve safe commands when in autoApprove mode (e.g. scaffold step)
+  let approved: ParsedCommand[] = [];
+  let declined: ParsedCommand[] = [];
+
+  if (options?.autoApprove) {
+    const autoApproved: ParsedCommand[] = [];
+    const needsConsent: ParsedCommand[] = [];
+
+    for (const cmd of safeCommands) {
+      if (isAutoApprovable(cmd.command)) {
+        autoApproved.push(cmd);
+        logger.info("terminalRunner", `Auto-approved: ${cmd.command}`);
+      } else {
+        needsConsent.push(cmd);
+      }
+    }
+
+    approved.push(...autoApproved);
+    if (autoApproved.length > 0) {
+      stream.markdown(
+        `\n> 🔧 Auto-running ${autoApproved.length} setup command(s): ` +
+        autoApproved.map(c => `\`${c.command}\``).join(", ") + `\n`
+      );
+    }
+
+    // For non-auto-approvable commands, still ask consent
+    if (needsConsent.length > 0) {
+      const consent = await requestCommandConsent(needsConsent);
+      approved.push(...consent.approved);
+      declined.push(...consent.declined);
+    }
+  } else {
+    // Normal mode: ask consent for all commands
+    const consent = await requestCommandConsent(safeCommands);
+    approved = consent.approved;
+    declined = consent.declined;
+  }
 
   for (const cmd of declined) {
     result.skipped.push({ command: cmd.command, reason: "User declined" });

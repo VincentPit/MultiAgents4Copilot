@@ -20,6 +20,10 @@ import {
 } from "../utils/qualityGate";
 import { AgentOutputManager } from "../utils/agentOutputManager";
 import { showBatchDiffs } from "../utils/diffViewer";
+import {
+  readFilesMatching,
+  formatFilesForLLM,
+} from "../utils/fileReader";
 import type { TerminalResult } from "../graph/state";
 
 const SYSTEM_PROMPT = `You are the Coder agent — an expert software engineer who writes real files.
@@ -109,6 +113,34 @@ export async function coderNode(
   if (incomingMsgs.length > 0) {
     const comms = incomingMsgs.map(m => `[${m.from}]: ${m.content.slice(0, 1500)}`).join("\n");
     sysPrompt += `\n\n## Agent Messages\n${comms}`;
+  }
+
+  // ── Read existing source files from the workspace ──
+  // Gives the coder visibility into the current codebase so it can
+  // extend/modify existing code rather than generating in a vacuum.
+  try {
+    const sourceGlobs = [
+      "src/**/*.{ts,tsx,js,jsx,py,go,rs,java,cs}",
+      "app/**/*.{ts,tsx,js,jsx,py}",
+      "lib/**/*.{ts,tsx,js,jsx,py,go,rs}",
+      "pages/**/*.{ts,tsx,js,jsx}",
+      "components/**/*.{ts,tsx,js,jsx}",
+    ];
+    const existingFiles = await readFilesMatching(sourceGlobs, {
+      maxFiles: 25,
+      maxCharsPerFile: 6_000,
+      maxTotalChars: 40_000,
+    });
+    if (existingFiles.length > 0) {
+      const existingContext = formatFilesForLLM(
+        existingFiles,
+        "EXISTING SOURCE FILES (read these before coding — integrate with this codebase)",
+      );
+      sysPrompt += `\n\n${existingContext}`;
+      logger.info("coder", `Injected ${existingFiles.length} existing file(s) into prompt`);
+    }
+  } catch (err: any) {
+    logger.warn("coder", `Failed to read existing files: ${err?.message}`);
   }
 
   const lastUserContent = [...state.messages].reverse().find(m => m.role === "user")?.content ?? "";

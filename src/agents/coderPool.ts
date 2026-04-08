@@ -34,8 +34,14 @@ import {
   type BuildDiagnostic,
 } from "../utils/qualityGate";
 import { AgentOutputManager } from "../utils/agentOutputManager";
+import { MultiCoderViewManager } from "../utils/multiCoderView";
 import { showBatchDiffs } from "../utils/diffViewer";
 import { GoWorkerBridge } from "../utils/goWorkerBridge";
+import {
+  readFilesMatching,
+  formatFilesForLLM,
+  domainPatternsToGlobs,
+} from "../utils/fileReader";
 
 // ── Concurrency limiter ──────────────────────────────────────────────
 // Limits parallel LLM API calls to avoid overwhelming the Copilot rate
@@ -303,9 +309,9 @@ async function generateScaffold(
     logger.error("staff-scaffold", `Scaffold write failed: ${err?.message}`);
   }
 
-  // Run any setup commands (e.g., npm install)
+  // Run any setup commands (e.g., npm install) — auto-approve common ones
   try {
-    await runCommandsFromOutput(scaffoldCode, stream);
+    await runCommandsFromOutput(scaffoldCode, stream, { autoApprove: true });
   } catch (err: any) {
     logger.warn("staff-scaffold", `Scaffold commands failed: ${err?.message}`);
   }
@@ -557,6 +563,29 @@ async function runSingleDomainCoder(
   );
 
   let fullPrompt = sysPrompt;
+
+  // ── Read existing files matching this domain's patterns ──
+  // Gives the coder visibility into what's already on disk so it can
+  // integrate with (rather than overwrite) the existing codebase.
+  try {
+    const globs = domainPatternsToGlobs(domain.filePatterns);
+    const existingFiles = await readFilesMatching(globs, {
+      maxFiles: 20,
+      maxCharsPerFile: 6_000,
+      maxTotalChars: 40_000,
+    });
+    if (existingFiles.length > 0) {
+      const existingContext = formatFilesForLLM(
+        existingFiles,
+        "EXISTING SOURCE FILES (already on disk — read before coding)",
+      );
+      fullPrompt += `\n\n${existingContext}`;
+      logger.info(`coder:${domain.id}`, `Injected ${existingFiles.length} existing file(s) into prompt`);
+    }
+  } catch (err: any) {
+    logger.warn(`coder:${domain.id}`, `Failed to read existing files: ${err?.message}`);
+  }
+
   if (state.plan.length > 0) {
     fullPrompt += `\n\n## Plan\n${capContext(state.plan.join("\n"), 2_000)}`;
   }
@@ -692,9 +721,13 @@ export async function coderPoolNode(
     }
   }
 
-  // ── 4. Create per-domain output channels (separate windows) ──
+  // ── 4. Create per-domain output channels + multi-window view ──
   const outputMgr = AgentOutputManager.getInstance();
   outputMgr.createDomainChannels(domains);
+
+  // Open individual webview panels for each coder
+  const multiView = MultiCoderViewManager.getInstance();
+  multiView.openAll(domains);
 
   // ── 5. Try Go workers for true parallelism, fall back to JS ──
   const extensionPath = vscode.extensions.getExtension("stephenlee.multi-agent-copilot")
@@ -757,8 +790,19 @@ export async function coderPoolNode(
     });
   }
 
-  // Clean up domain channels
+  // Clean up domain channels (keep multi-window view open for review)
   outputMgr.disposeDomainChannels();
+
+  // Aggregate build/quality status for downstream nodes
+  const allErrors = branchResults.flatMap(r => r.errors);
+  const allTestsFailed = branchResults.filter(r => !r.testsPassed);
+  const buildPassed = allErrors.length === 0 && allTestsFailed.length === 0;
+  const qualityErrors = [
+    ...allErrors,
+    ...allTestsFailed
+      .filter(r => r.testOutput)
+      .map(r => `[${r.domainId}] ${r.testOutput}`),
+  ];
 
   return {
     messages: allMessages,
@@ -769,6 +813,12 @@ export async function coderPoolNode(
         ...scaffold.filesWritten,
         ...branchResults.flatMap(r => r.filesWritten),
       ].join(", "),
+      build_status: buildPassed
+        ? "passed"
+        : `failed:${allTestsFailed.length}`,
+      ...(qualityErrors.length > 0 ? {
+        quality_errors: qualityErrors.join("\n"),
+      } : {}),
       ...(scaffold.filesWritten.length > 0 ? {
         scaffold_files: scaffold.filesWritten.join(", "),
         scaffold_code: scaffold.scaffoldCode.length > 5000
@@ -794,6 +844,13 @@ async function runWithGoWorkers(
   scaffold?: ScaffoldResult,
 ): Promise<BranchResult[]> {
   const bridge = new GoWorkerBridge(extensionPath, model, state, stream, token);
+  const multiView = MultiCoderViewManager.getInstance();
+
+  // Mark all domains as coding in the multi-window view
+  for (const d of domains) {
+    multiView.updateStatus(d.id, "coding", { phase: "goroutine started" });
+    multiView.appendLog(d.id, "🚀 Go goroutine started…");
+  }
 
   try {
     const results = await bridge.run(
@@ -802,12 +859,23 @@ async function runWithGoWorkers(
       state.plan,
       2, // maxFixRetries
       (result) => {
-        // Per-worker completion callback — update dashboard + chat
+        // Per-worker completion callback — update dashboard + multi-window view
         const status = result.testsPassed ? "✅" : "⚠️";
         const elapsed = formatMs(result.durationMs);
         outputMgr.updateDomainStatus(
           result.domainId,
           `${status} done (${elapsed})`,
+        );
+        multiView.updateStatus(result.domainId, result.testsPassed ? "done" : "error", {
+          phase: `${result.filesWritten?.length ?? 0} file(s), ${elapsed}`,
+        });
+        if (result.filesWritten?.length) {
+          multiView.addFiles(result.domainId, result.filesWritten);
+        }
+        multiView.setTestResult(
+          result.domainId,
+          result.testsPassed,
+          result.testOutput ?? "",
         );
         stream.markdown(
           `\n##### 📦 ${result.domain} ${status} _(${elapsed})_\n` +
@@ -853,13 +921,18 @@ async function runWithJSFallback(
 ): Promise<BranchResult[]> {
   const sem = new Semaphore(LLM_CONCURRENCY);
 
+  const multiView = MultiCoderViewManager.getInstance();
+
   const promises = domains.map(async (domain, idx) => {
     const channelName = `domain:${domain.id}`;
     outputMgr.append(channelName, `⏳ Domain ${idx + 1}/${domains.length}: ${domain.domain} — waiting…`);
     outputMgr.updateDomainStatus(domain.id, `⏳ queued (${idx + 1}/${domains.length})`);
+    multiView.appendLog(domain.id, `⏳ Queued (${idx + 1}/${domains.length})`);
     await sem.acquire();
     outputMgr.append(channelName, `🚀 Generating code…`);
     outputMgr.updateDomainStatus(domain.id, "🚀 coding…");
+    multiView.updateStatus(domain.id, "coding", { phase: "generating code" });
+    multiView.appendLog(domain.id, `🚀 Generating code…`);
 
     const start = Date.now();
     try {
@@ -880,9 +953,13 @@ async function runWithJSFallback(
             await showBatchDiffs(filesWritten, writeResult.oldContents);
             outputMgr.append(channelName, `📁 Wrote ${filesWritten.length} file(s): ${filesWritten.join(", ")}`);
             outputMgr.updateDomainStatus(domain.id, `📁 ${filesWritten.length} file(s) written`);
+            multiView.updateStatus(domain.id, "writing", { phase: `${filesWritten.length} file(s)` });
+            multiView.addFiles(domain.id, filesWritten);
+            multiView.appendLog(domain.id, `📁 Wrote ${filesWritten.length} file(s): ${filesWritten.join(", ")}`);
           }
         } catch (err: any) {
           outputMgr.append(channelName, `⚠️ File write error: ${err?.message}`);
+          multiView.appendLog(domain.id, `⚠️ File write error: ${err?.message}`);
         }
 
         // Run individual tests
@@ -890,17 +967,24 @@ async function runWithJSFallback(
           const wsRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
           if (wsRoot) {
             outputMgr.append(channelName, `🧪 Running individual tests…`);
+            multiView.updateStatus(domain.id, "testing", { phase: "running tests" });
+            multiView.appendLog(domain.id, `🧪 Running individual tests…`);
             const qa = await runQualityGate(wsRoot, filesWritten);
             testsPassed = qa.passed;
             testOutput = qa.passed ? "All passed" : formatQualityReportForLLM(qa);
             outputMgr.append(channelName, testsPassed ? `✅ Tests passed` : `❌ Tests failed`);
             outputMgr.updateDomainStatus(domain.id, testsPassed ? "✅ tests passed" : "❌ tests failed");
+            multiView.setTestResult(domain.id, testsPassed, testOutput);
+            multiView.appendLog(domain.id, testsPassed ? `✅ Tests passed` : `❌ Tests failed`);
           }
         }
       }
 
       const elapsed = durationMs < 1000 ? `${durationMs}ms` : `${(durationMs / 1000).toFixed(1)}s`;
       outputMgr.updateDomainStatus(domain.id, `✅ done (${elapsed})`);
+      multiView.updateStatus(domain.id, result.error ? "error" : "done", {
+        phase: result.error ? result.error.slice(0, 60) : `${filesWritten.length} file(s), ${elapsed}`,
+      });
 
       const branchResult: BranchResult = {
         domainId: domain.id,
