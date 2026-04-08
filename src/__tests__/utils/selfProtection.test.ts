@@ -63,6 +63,8 @@ describe("isExtensionOwnFile", () => {
     expect(isExtensionOwnFile("src/utils/fileWriter.ts", extRoot)).toBe(true);
     expect(isExtensionOwnFile("src/security/securityConfig.ts", extRoot)).toBe(true);
     expect(isExtensionOwnFile("src/types/index.ts", extRoot)).toBe(true);
+    expect(isExtensionOwnFile("src/go-worker/main.go", extRoot)).toBe(true);
+    expect(isExtensionOwnFile("src/go-worker/worker.go", extRoot)).toBe(true);
     expect(isExtensionOwnFile("out/extension.js", extRoot)).toBe(true);
     expect(isExtensionOwnFile("package.json", extRoot)).toBe(true);
     expect(isExtensionOwnFile("tsconfig.json", extRoot)).toBe(true);
@@ -120,6 +122,7 @@ describe("filterSelfFromFileTree", () => {
       "  📁 agents/",
       "  📁 graph/",
       "  📁 utils/",
+      "  📁 go-worker/",
       "  📄 extension.ts",
       "📁 examples/",
       "  📄 demo.ts",
@@ -131,6 +134,7 @@ describe("filterSelfFromFileTree", () => {
     expect(filtered).not.toContain("agents");
     expect(filtered).not.toContain("graph");
     expect(filtered).not.toContain("utils");
+    expect(filtered).not.toContain("go-worker");
     expect(filtered).not.toContain("extension.ts");
     expect(filtered).not.toContain("package.json");
     // Non-extension items should remain

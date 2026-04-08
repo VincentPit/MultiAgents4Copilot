@@ -228,3 +228,138 @@ export function safeSerializeState(obj: unknown, maxValueLength = 200): string {
     return "[unserializable state]";
   }
 }
+
+// ─── Security Event Bus ──────────────────────────────────────────────────────
+
+import type { SecurityEvent, SecurityEventListener, SecuritySeverity } from "../types/security.js";
+
+const _securityListeners: SecurityEventListener[] = [];
+
+/**
+ * Register a listener for security events.
+ * Returns an unsubscribe function.
+ */
+export function onSecurityEvent(listener: SecurityEventListener): () => void {
+  _securityListeners.push(listener);
+  return () => {
+    const idx = _securityListeners.indexOf(listener);
+    if (idx >= 0) { _securityListeners.splice(idx, 1); }
+  };
+}
+
+/**
+ * Emit a security event to all registered listeners.
+ */
+export function emitSecurityEvent(
+  domain: SecurityEvent["domain"],
+  severity: SecuritySeverity,
+  code: string,
+  message: string,
+  metadata?: Record<string, unknown>,
+): void {
+  const event: SecurityEvent = Object.freeze({
+    timestamp: new Date().toISOString(),
+    domain,
+    severity,
+    code,
+    message,
+    ...(metadata ? { metadata } : {}),
+  });
+  for (const listener of _securityListeners) {
+    try { listener(event); } catch { /* listener errors must not propagate */ }
+  }
+}
+
+/**
+ * Remove all registered security event listeners (for testing).
+ */
+export function clearSecurityListeners(): void {
+  _securityListeners.length = 0;
+}
+
+// ─── Input Sanitization ──────────────────────────────────────────────────────
+
+/**
+ * Sanitize a string for safe inclusion in webview HTML.
+ * Escapes `<`, `>`, `&`, `"`, `'`, backtick to prevent XSS.
+ */
+export function sanitizeForHtml(input: string): string {
+  return input
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;")
+    .replace(/`/g, "&#96;");
+}
+
+/**
+ * Strip ANSI escape codes from terminal output.
+ */
+export function stripAnsi(input: string): string {
+  // eslint-disable-next-line no-control-regex
+  return input.replace(/\x1B\[[0-9;]*[A-Za-z]/g, "");
+}
+
+// ─── Rate Limiter ────────────────────────────────────────────────────────────
+
+/**
+ * A simple sliding-window rate limiter.
+ * Tracks timestamps of recent calls and rejects when the window is full.
+ */
+export class RateLimiter {
+  private readonly _maxCalls: number;
+  private readonly _windowMs: number;
+  private readonly _timestamps: number[] = [];
+
+  constructor(maxCalls: number, windowMs: number) {
+    this._maxCalls = maxCalls;
+    this._windowMs = windowMs;
+  }
+
+  /**
+   * Try to acquire a permit. Returns `true` if allowed, `false` if rate-limited.
+   */
+  tryAcquire(): boolean {
+    const now = Date.now();
+    // Evict expired timestamps
+    while (this._timestamps.length > 0 && this._timestamps[0] <= now - this._windowMs) {
+      this._timestamps.shift();
+    }
+    if (this._timestamps.length >= this._maxCalls) {
+      return false;
+    }
+    this._timestamps.push(now);
+    return true;
+  }
+
+  /**
+   * Number of remaining permits in the current window.
+   */
+  get remaining(): number {
+    const now = Date.now();
+    while (this._timestamps.length > 0 && this._timestamps[0] <= now - this._windowMs) {
+      this._timestamps.shift();
+    }
+    return Math.max(0, this._maxCalls - this._timestamps.length);
+  }
+
+  /**
+   * Reset all tracked timestamps.
+   */
+  reset(): void {
+    this._timestamps.length = 0;
+  }
+}
+
+/**
+ * Redact secrets from a string for safe logging.
+ * Replaces detected patterns with `[REDACTED]`.
+ */
+export function redactSecrets(input: string): string {
+  let result = input;
+  for (const { pattern } of SECRET_VALUE_PATTERNS) {
+    result = result.replace(new RegExp(pattern.source, pattern.flags + "g"), "[REDACTED]");
+  }
+  return result;
+}
