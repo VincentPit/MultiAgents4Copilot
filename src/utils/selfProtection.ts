@@ -40,6 +40,7 @@ const SELF_SOURCE_PATTERNS: RegExp[] = [
   /^src\/graph\//,
   /^src\/security\//,
   /^src\/utils\//,
+  /^src\/go-worker\//,
   /^src\/types\//,
   /^src\/__mocks__\//,
   /^src\/__tests__\//,
@@ -160,7 +161,7 @@ function isSelfSourcePath(relPath: string): boolean {
  */
 const SELF_DIR_NAMES = new Set([
   "agents", "graph", "security", "utils", "types",
-  "__mocks__", "__tests__", "out",
+  "__mocks__", "__tests__", "out", "go-worker",
 ]);
 
 /**

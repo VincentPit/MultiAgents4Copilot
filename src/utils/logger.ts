@@ -6,6 +6,7 @@
  */
 
 import * as vscode from "vscode";
+import { redactSecrets } from "./security";
 
 let _channel: vscode.LogOutputChannel | undefined;
 
@@ -17,9 +18,10 @@ function getChannel(): vscode.LogOutputChannel {
 }
 
 function format(source: string, message: string, data?: unknown): string {
+  const safeMsg = redactSecrets(message);
   const line = data
-    ? `[${source}] ${message} ${JSON.stringify(data)}`
-    : `[${source}] ${message}`;
+    ? `[${source}] ${safeMsg} ${redactSecrets(JSON.stringify(data))}`
+    : `[${source}] ${safeMsg}`;
   return line;
 }
 

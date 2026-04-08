@@ -51,7 +51,18 @@ export interface SecurityConfig {
  * within each domain module — this file centralizes them for visibility
  * and optional override.
  */
-export const DEFAULT_SECURITY_CONFIG: Readonly<SecurityConfig> = Object.freeze({
+/** Recursively freeze an object and all nested objects/arrays. */
+function deepFreeze<T extends object>(obj: T): Readonly<T> {
+  Object.freeze(obj);
+  for (const value of Object.values(obj)) {
+    if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
+      deepFreeze(value);
+    }
+  }
+  return obj;
+}
+
+export const DEFAULT_SECURITY_CONFIG: Readonly<SecurityConfig> = deepFreeze({
   input: {
     maxInputLength: 50_000,
     maxOutputLength: 100_000,
