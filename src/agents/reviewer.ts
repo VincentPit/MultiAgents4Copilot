@@ -7,7 +7,10 @@ import { AgentState, AgentMessage, postAgentMessage } from "../graph/state";
 import { callModel, buildMessages, capContext } from "./base";
 import { logger } from "../utils/logger";
 
-const MAX_REVIEWS = 3;
+export const MAX_REVIEWS = 3;
+
+/** Maximum characters stored for a review response in state. */
+export const MAX_REVIEW_CHARS = 6_000;
 
 const SYSTEM_PROMPT = `You are the Reviewer agent \u2014 a senior code reviewer.
 
@@ -69,12 +72,13 @@ export async function reviewerNode(
 
   const response = await callModel(model, messages, stream, token, "reviewer");
 
-  const approved = response.toUpperCase().includes("VERDICT: APPROVE");
+  // Robust verdict parsing — match "VERDICT: APPROVE" on its own line (case-insensitive)
+  const approved = /^\s*VERDICT\s*:\s*APPROVE\b/im.test(response);
   const newCount = state.reviewCount + 1;
   const forceApprove = newCount >= MAX_REVIEWS;
 
-  const cappedResponse = response.length > 6000
-    ? response.slice(0, 6000) + "\n[... review truncated in state]"
+  const cappedResponse = response.length > MAX_REVIEW_CHARS
+    ? response.slice(0, MAX_REVIEW_CHARS) + "\n[... review truncated in state]"
     : response;
 
   const newMessage: AgentMessage = {

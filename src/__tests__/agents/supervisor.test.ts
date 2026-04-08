@@ -148,4 +148,57 @@ describe("supervisorNode routing decisions", () => {
     expect(callArgs.userQuestion).toContain("coder");
     expect(callArgs.userQuestion).toContain("coder");
   });
+
+  it("includes quality gate state in question when artifacts present", async () => {
+    mockCallModel.mockResolvedValue("coder");
+    const state = createInitialState("test");
+    state.artifacts["quality_summary"] = "3 errors, 1 warning";
+
+    await supervisorNode(state, mockModel, mockStream(), mockToken());
+
+    const callArgs = mockBuildMessages.mock.calls[0][0];
+    expect(callArgs.userQuestion).toContain("Quality gate:");
+    expect(callArgs.userQuestion).toContain("3 errors");
+  });
+
+  it("warns about build errors in question", async () => {
+    mockCallModel.mockResolvedValue("coder");
+    const state = createInitialState("test");
+    state.artifacts["build_errors"] = "true";
+
+    await supervisorNode(state, mockModel, mockStream(), mockToken());
+
+    const callArgs = mockBuildMessages.mock.calls[0][0];
+    expect(callArgs.userQuestion).toContain("BUILD HAS ERRORS");
+  });
+
+  it("caps long questions to prevent context bloat", async () => {
+    mockCallModel.mockResolvedValue("finish");
+    const state = createInitialState("test");
+    // Inflate the plan so the question exceeds the cap
+    state.plan = Array.from({ length: 50 }, (_, i) =>
+      `${i + 1}. (coder) ${"A really long plan step description ".repeat(10)}`
+    );
+    state.planStep = 0;
+
+    await supervisorNode(state, mockModel, mockStream(), mockToken());
+
+    const callArgs = mockBuildMessages.mock.calls[0][0];
+    expect(callArgs.userQuestion.length).toBeLessThanOrEqual(4200);
+  });
+
+  it("filters failed agents from routing decisions", async () => {
+    mockCallModel.mockResolvedValue("coder");
+    const state = createInitialState("test");
+    state.messages.push({
+      role: "system",
+      name: "graph-router",
+      content: "Previously failed agents: [coder]",
+    });
+
+    const result = await supervisorNode(state, mockModel, mockStream(), mockToken());
+
+    // coder was the LLM choice but it's in the failed list → should finish
+    expect(result.nextAgent).toBe("finish");
+  });
 });

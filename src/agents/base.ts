@@ -123,10 +123,10 @@ export async function selectModel(
 
 // ── Model calling with retry + fallback ──────────────────────────────
 
-const MAX_RETRIES = 3;
+export const MAX_RETRIES = 3;
 
 /** Maximum output characters — prevents a runaway model from flooding the state. */
-const MAX_OUTPUT_CHARS = 200_000;
+export const MAX_OUTPUT_CHARS = 200_000;
 
 /**
  * Compute a safe token budget for a model.
@@ -351,13 +351,14 @@ export function capContext(ctx: string, maxChars: number = 20_000): string {
 /**
  * Strip known LLM instruction markers that could be injected via
  * file contents, chat history, or workspace context.
- * Catches ChatML, Llama, and generic `<|...|>` delimiters.
+ * Catches ChatML, Llama, Anthropic XML, and generic `<|...|>` delimiters.
  */
 export function sanitizeLLMInput(s: string): string {
   return s
-    .replace(/<\|[^|]*\|>/g, "[filtered]")           // All <|...|> markers (ChatML, etc.)
+    .replace(/<\|[^|]*\|>/g, "[filtered]")           // All <|...|> markers (ChatML, eot_id, etc.)
     .replace(/<<\/?SYS>>/gi, "[filtered]")            // Llama <<SYS>> / <</SYS>>
-    .replace(/\[\/?INST\]/gi, "[filtered]");           // Llama [INST] / [/INST]
+    .replace(/\[\/?INST\]/gi, "[filtered]")            // Llama [INST] / [/INST]
+    .replace(/<\/?(?:function_calls|tool_call|tool_result|antml_thinking)\b[^>]*>/gi, "[filtered]"); // XML tool/thinking wrappers
 }
 
 export function sysMsg(content: string): vscode.LanguageModelChatMessage {

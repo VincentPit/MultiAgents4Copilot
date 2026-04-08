@@ -6,6 +6,12 @@ import * as vscode from "vscode";
 import { AgentState, AgentMessage } from "../graph/state";
 import { callModel, buildMessages } from "./base";
 
+/** Maximum characters stored for a plan response in state. */
+export const MAX_PLAN_CHARS = 6_000;
+
+/** Maximum numbered steps we'll keep from the planner output. */
+export const MAX_PLAN_STEPS = 12;
+
 const SYSTEM_PROMPT = `You are the Planner agent on a multi-agent coding team.
 
 Break the user's request into a clear, numbered step-by-step plan.
@@ -56,15 +62,16 @@ export async function plannerNode(
 
   const response = await callModel(model, messages, stream, token, "planner");
 
-  // Parse numbered lines
+  // Parse numbered lines and enforce step cap
   const lines = response
     .split("\n")
     .map((l) => l.trim())
-    .filter((l) => /^\d+[\.\)]/.test(l));
+    .filter((l) => /^\d+[\.\)]/.test(l))
+    .slice(0, MAX_PLAN_STEPS);
 
   // Cap what we store in state.messages to avoid bloating context for downstream agents
-  const cappedResponse = response.length > 6000
-    ? response.slice(0, 6000) + "\n[… plan truncated in state]"
+  const cappedResponse = response.length > MAX_PLAN_CHARS
+    ? response.slice(0, MAX_PLAN_CHARS) + "\n[… plan truncated in state]"
     : response;
 
   const newMessage: AgentMessage = {
