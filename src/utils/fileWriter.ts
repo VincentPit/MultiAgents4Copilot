@@ -210,6 +210,9 @@ function guessLanguage(filePath: string): string {
  * summary. Users can click "Apply" to approve, "Review List" to inspect
  * the full file list in a QuickPick, or "Cancel" to decline.
  */
+/** Timeout for the consent dialog — auto-approves if user doesn't respond. */
+const CONSENT_TIMEOUT_MS = 30_000; // 30 seconds
+
 async function requestWriteConsent(
   blocks: ParsedFileBlock[],
   workspaceRoot: vscode.Uri,
@@ -235,12 +238,28 @@ async function requestWriteConsent(
   const summary = parts.join(", ");
 
   // Non-modal notification toast — compact sliding bar in bottom-right
-  const choice = await vscode.window.showWarningMessage(
-    `🤖 Agent wants to write ${blocks.length} file(s) (${summary})`,
+  // Race against a timeout so the pipeline doesn't hang forever if the
+  // user misses the toast notification.
+  const dialogPromise = vscode.window.showWarningMessage(
+    `🤖 Agent wants to write ${blocks.length} file(s) (${summary}) — auto-approving in 30s`,
     "Apply Changes",
     "Review List",
     "Cancel",
   );
+
+  const timeoutPromise = new Promise<string | undefined>(resolve => {
+    setTimeout(() => resolve("Apply Changes"), CONSENT_TIMEOUT_MS);
+  });
+
+  const choice = await Promise.race([dialogPromise, timeoutPromise]);
+
+  if (choice === undefined) {
+    // Timeout expired without user interaction — but undefined also means
+    // the dialog was dismissed (Esc). For timeout, Promise.race resolves
+    // with "Apply Changes". If we get undefined, user actively dismissed.
+    logger.info("fileWriter", `User consent: DENIED (dismissed) for ${blocks.length} file(s)`);
+    return false;
+  }
 
   if (choice === "Review List") {
     // Show detailed file list in a QuickPick so user can inspect
@@ -273,7 +292,11 @@ async function requestWriteConsent(
   }
 
   const consented = choice === "Apply Changes";
-  logger.info("fileWriter", `User consent: ${consented ? "APPROVED" : "DENIED"} for ${blocks.length} file(s)`);
+  if (consented) {
+    logger.info("fileWriter", `User consent: APPROVED for ${blocks.length} file(s)`);
+  } else {
+    logger.info("fileWriter", `User consent: DENIED for ${blocks.length} file(s)`);
+  }
   return consented;
 }
 
@@ -288,6 +311,7 @@ async function requestWriteConsent(
 export async function writeFileBlocks(
   blocks: ParsedFileBlock[],
   stream: vscode.ChatResponseStream,
+  options?: { autoApprove?: boolean },
 ): Promise<WriteResult> {
   const result: WriteResult = { written: [], skipped: [], oldContents: new Map() };
 
@@ -299,7 +323,9 @@ export async function writeFileBlocks(
   }
 
   // ── Ask the user for consent before writing anything ──
-  const consented = await requestWriteConsent(blocks, workspaceRoot);
+  const consented = options?.autoApprove
+    ? (() => { logger.info("fileWriter", `Auto-approved ${blocks.length} file(s)`); return true; })()
+    : await requestWriteConsent(blocks, workspaceRoot);
   if (!consented) {
     stream.markdown(
       `\n> 🚫 **Changes declined** — no files were written. ` +
@@ -403,6 +429,7 @@ export async function writeFileBlocks(
 export async function applyCodeToWorkspace(
   llmOutput: string,
   stream: vscode.ChatResponseStream,
+  options?: { autoApprove?: boolean },
 ): Promise<WriteResult> {
   const blocks = parseFileBlocks(llmOutput);
 
@@ -411,5 +438,5 @@ export async function applyCodeToWorkspace(
     return { written: [], skipped: [], oldContents: new Map() };
   }
 
-  return writeFileBlocks(blocks, stream);
+  return writeFileBlocks(blocks, stream, options);
 }

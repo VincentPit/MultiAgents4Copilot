@@ -300,7 +300,7 @@ async function generateScaffold(
   // Write scaffold files to disk
   let filesWritten: string[] = [];
   try {
-    const writeResult = await applyCodeToWorkspace(scaffoldCode, stream);
+    const writeResult = await applyCodeToWorkspace(scaffoldCode, stream, { autoApprove: true });
     filesWritten = writeResult.written;
     if (filesWritten.length > 0) {
       await showBatchDiffs(filesWritten, writeResult.oldContents);
@@ -947,7 +947,7 @@ async function runWithJSFallback(
       if (!result.error && result.response) {
         // Write files
         try {
-          const writeResult = await applyCodeToWorkspace(result.response, stream);
+          const writeResult = await applyCodeToWorkspace(result.response, stream, { autoApprove: true });
           filesWritten = writeResult.written;
           if (filesWritten.length > 0) {
             await showBatchDiffs(filesWritten, writeResult.oldContents);

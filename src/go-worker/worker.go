@@ -15,46 +15,123 @@ var (
 	// Matches ### `path/to/file.ts` headings before code blocks
 	headingRe = regexp.MustCompile(`(?m)^#{1,4}\s+` + "`" + `([^\x60\s]+\.[a-zA-Z0-9]+)` + "`" + `\s*$`)
 
+	// Additional path patterns (mirrors the Node.js fileWriter parser):
+	//   **`path`** or **path**
+	boldPathRe = regexp.MustCompile("(?m)^\\*\\*`?([^\\s`*]+\\.[a-zA-Z0-9]+)`?\\*\\*\\s*$")
+	//   File: path  |  File path: `path`
+	filePathRe = regexp.MustCompile("(?mi)^(?:File(?:\\s*path)?)\\s*:\\s*`?([^\\s`]+\\.[a-zA-Z0-9]+)`?\\s*$")
+	//   - `path` (bullet with backtick-wrapped path)
+	bulletPathRe = regexp.MustCompile("(?m)^[-*]\\s+`([^\\s`]+\\.[a-zA-Z0-9]+)`\\s*$")
+	//   Bare path on its own line
+	barePathRe = regexp.MustCompile("(?m)^((?:[\\w.-]+/)+[\\w.-]+\\.[a-zA-Z0-9]+)\\s*$")
+
 	// Matches fenced code blocks: ```lang\n...content...\n```
 	fenceRe = regexp.MustCompile("(?s)```(\\w*)\\n(.*?)```")
+
+	// Matches fenced code blocks with annotation: ```lang:path\n...content...\n```
+	annotatedFenceRe = regexp.MustCompile("(?s)```(\\w+):([^\\s`]+\\.[a-zA-Z0-9]+)\\n(.*?)```")
 
 	// Matches bash/shell code blocks for command extraction
 	bashFenceRe = regexp.MustCompile("(?s)```(?:bash|sh|shell|zsh)\\n(.*?)```")
 )
 
 // ParseCodeBlocks extracts file blocks from LLM output.
-// Expected format:
+// Supports multiple path formats:
 //
-//	### `src/api/routes.ts`
-//	```typescript
-//	// file contents
-//	```
+//	### `src/api/routes.ts`       ← heading with backticks
+//	**src/api/routes.ts**         ← bold path
+//	File: src/api/routes.ts       ← File: prefix
+//	- `src/api/routes.ts`         ← bullet item
+//	src/api/routes.ts             ← bare path
+//	```typescript:src/api/routes.ts  ← annotated fence
+//
+// Followed by a fenced code block.
 func ParseCodeBlocks(llmOutput string) []CodeBlock {
 	var blocks []CodeBlock
+	seen := make(map[string]bool) // deduplicate by path
 
-	headings := headingRe.FindAllStringSubmatchIndex(llmOutput, -1)
-
-	for _, loc := range headings {
-		if len(loc) < 4 {
-			continue
+	// Strategy 1: annotated fence — ```lang:path\n...```
+	annotated := annotatedFenceRe.FindAllStringSubmatch(llmOutput, -1)
+	for _, m := range annotated {
+		filePath := normalizePath(m[2])
+		if filePath != "" && !seen[filePath] {
+			seen[filePath] = true
+			blocks = append(blocks, CodeBlock{
+				Path:     filePath,
+				Content:  m[3],
+				Language: m[1],
+			})
 		}
-		filePath := llmOutput[loc[2]:loc[3]]
+	}
 
-		// Find the next code fence after this heading
-		afterHeading := llmOutput[loc[1]:]
-		fenceMatch := fenceRe.FindStringSubmatch(afterHeading)
-		if fenceMatch == nil {
-			continue
+	// Strategy 2: heading/path patterns followed by a code fence
+	allPatterns := []*regexp.Regexp{headingRe, boldPathRe, filePathRe, bulletPathRe, barePathRe}
+
+	for _, pattern := range allPatterns {
+		matches := pattern.FindAllStringSubmatchIndex(llmOutput, -1)
+		for _, loc := range matches {
+			if len(loc) < 4 {
+				continue
+			}
+			filePath := normalizePath(llmOutput[loc[2]:loc[3]])
+			if filePath == "" || seen[filePath] {
+				continue
+			}
+
+			// Find the next code fence after this path line
+			afterPath := llmOutput[loc[1]:]
+			fenceMatch := fenceRe.FindStringSubmatch(afterPath)
+			if fenceMatch == nil {
+				continue
+			}
+
+			// Make sure the fence is close (within ~200 chars — no big gaps)
+			fenceIdx := strings.Index(afterPath, "```")
+			if fenceIdx > 200 {
+				continue
+			}
+
+			seen[filePath] = true
+			blocks = append(blocks, CodeBlock{
+				Path:     filePath,
+				Content:  fenceMatch[2],
+				Language: fenceMatch[1],
+			})
 		}
-
-		blocks = append(blocks, CodeBlock{
-			Path:     strings.TrimSpace(filePath),
-			Content:  fenceMatch[2],
-			Language: fenceMatch[1],
-		})
 	}
 
 	return blocks
+}
+
+// normalizePath cleans a file path: strips leading ./, /, backticks, quotes.
+func normalizePath(p string) string {
+	p = strings.TrimSpace(p)
+	p = strings.Trim(p, "`'\"")
+	p = strings.TrimPrefix(p, "./")
+	p = strings.TrimLeft(p, "/")
+	if p == "" || !looksLikeFilePath(p) {
+		return ""
+	}
+	return p
+}
+
+// looksLikeFilePath checks if a string plausibly looks like a file path.
+func looksLikeFilePath(s string) bool {
+	if len(s) < 3 || len(s) > 200 {
+		return false
+	}
+	if strings.Contains(s, " ") {
+		return false
+	}
+	if strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "https://") {
+		return false
+	}
+	// Must have a file extension
+	dot := strings.LastIndex(s, ".")
+	if dot < 0 || dot == len(s)-1 {
+		return false
+	}
+	return true
 }
 
 // ParseBashCommands extracts shell commands from LLM output.

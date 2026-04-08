@@ -128,6 +128,27 @@ export const MAX_RETRIES = 3;
 /** Maximum output characters — prevents a runaway model from flooding the state. */
 export const MAX_OUTPUT_CHARS = 200_000;
 
+/** Per-attempt total timeout (ms) — kills a call that takes too long overall. */
+export const CALL_TIMEOUT_MS = 120_000; // 2 minutes
+
+/** Idle timeout (ms) — if no new tokens arrive within this window, abort. */
+export const IDLE_TIMEOUT_MS = 60_000; // 60 seconds
+
+/**
+ * Race a promise against a timeout. Cleans up the timer on resolution.
+ */
+function raceWithTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  message: string
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 /**
  * Compute a safe token budget for a model.
  * Uses model.maxInputTokens if available, otherwise defaults conservatively.
@@ -202,20 +223,53 @@ export async function callModel(
       const estTokens = Math.ceil(totalChars / 4);
       logger.info(agentName, `Attempt ${attempt}: sending ${messages.length} msgs, ~${estTokens} tokens (~${totalChars} chars)`);
 
-      const response = await model.sendRequest(messages, {}, token);
+      // Wrap sendRequest with a timeout to prevent indefinite hangs
+      // Convert Thenable to Promise for compatibility with Promise.race
+      const sendPromise = Promise.resolve(model.sendRequest(messages, {}, token));
+      const response = await raceWithTimeout(
+        sendPromise,
+        CALL_TIMEOUT_MS,
+        `sendRequest timeout after ${CALL_TIMEOUT_MS / 1000}s`
+      );
       const chunks: string[] = [];
       let outputChars = 0;
 
-      for await (const chunk of response.text) {
+      // Stream with idle + total timeout to prevent hangs.
+      // We manually iterate the async generator so we can race each
+      // chunk against a timeout — `for await` would block indefinitely.
+      const callStart = Date.now();
+      const iterator = response.text[Symbol.asyncIterator]();
+      let done = false;
+
+      while (!done) {
+        // Check total call timeout before each chunk
+        const elapsed = Date.now() - callStart;
+        if (elapsed > CALL_TIMEOUT_MS) {
+          logger.warn(agentName, `Call timeout: exceeded ${CALL_TIMEOUT_MS}ms total — aborting`);
+          throw new Error(`Call timeout after ${CALL_TIMEOUT_MS}ms`);
+        }
+
+        // Race next chunk against idle timeout
+        const remaining = Math.min(IDLE_TIMEOUT_MS, CALL_TIMEOUT_MS - elapsed);
+        const next = await raceWithTimeout(
+          iterator.next(),
+          remaining,
+          `Idle timeout: no tokens received for ${IDLE_TIMEOUT_MS / 1000}s`
+        );
+
+        if (next.done) {
+          done = true;
+          break;
+        }
+
+        const chunk = next.value;
         chunks.push(chunk);
         outputChars += chunk.length;
         if (outputSink) {
-          // Stream to the agent's output channel (not the chat panel)
           outputSink.append(chunk);
         } else if (stream) {
           stream.markdown(chunk);
         }
-        // Safety: stop accumulating if output is absurdly large
         if (outputChars > MAX_OUTPUT_CHARS) {
           logger.warn(agentName, `Output exceeded ${MAX_OUTPUT_CHARS} chars — truncating`);
           break;

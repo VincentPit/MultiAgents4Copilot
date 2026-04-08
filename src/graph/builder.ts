@@ -100,6 +100,9 @@ export class ProgressTracker {
   private stream: vscode.ChatResponseStream;
   private graphStartMs: number;
   private tickTimer: ReturnType<typeof setInterval> | undefined;
+  private tickCount = 0;
+  /** Max progress lines to emit per agent run — prevents chat spam. */
+  private static readonly MAX_TICK_EMISSIONS = 6;
 
   constructor(stream: vscode.ChatResponseStream, graphStartMs: number) {
     this.stream = stream;
@@ -111,6 +114,7 @@ export class ProgressTracker {
     // Remove any existing entry for this agent (re-run scenario)
     this.agents = this.agents.filter(a => !(a.name === name && a.status === "pending"));
     this.agents.push({ name, status: "running", startMs: Date.now() });
+    this.tickCount = 0; // Reset per-agent emission cap
     this.emitProgressLine();
     // coder_pool streams its own detailed per-domain progress — skip the
     // periodic tick so we don't spam the chat with hundreds of identical bars.
@@ -192,6 +196,10 @@ export class ProgressTracker {
 
   /** Emit a stream.progress() line showing all currently running agents with elapsed times. */
   private emitProgressLine(): void {
+    // Cap emissions to avoid flooding the chat with duplicate progress bars
+    if (this.tickCount >= ProgressTracker.MAX_TICK_EMISSIONS) { return; }
+    this.tickCount++;
+
     const now = Date.now();
     const running = this.agents.filter(a => a.status === "running");
     if (running.length === 0) {
@@ -237,7 +245,7 @@ export class ProgressTracker {
     if (this.tickTimer) { return; } // Already running
     this.tickTimer = setInterval(() => {
       this.emitProgressLine();
-    }, 10_000); // Update every 10 seconds (not every 1s — stream.progress appends, not replaces)
+    }, 30_000); // Update every 30 seconds (stream.progress appends, so keep it sparse)
   }
 
   /** Stop the periodic tick. */
@@ -277,9 +285,13 @@ export function formatDurationShort(ms: number): string {
 export function buildGraph(config: GraphConfig) {
   const { nodes, entryPoint, maxSteps } = config;
 
+  /** Per-agent timeout (ms) — kills any agent that runs longer than this. */
+  const AGENT_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes (coder_pool has many sub-calls)
+
   /**
    * Run a single agent node with timing and error handling.
    * Optionally accepts a ProgressTracker for live progress updates.
+   * Includes a per-agent timeout to prevent indefinite hangs.
    */
   async function runNode(
     name: string,
@@ -297,7 +309,19 @@ export function buildGraph(config: GraphConfig) {
     const start = Date.now();
     logger.agentStart(name);
     try {
-      const update = await nodeFn(state, model, stream, token);
+      // Race the agent against a hard timeout
+      let timer: ReturnType<typeof setTimeout>;
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`Agent "${name}" timed out after ${AGENT_TIMEOUT_MS / 1000}s`)),
+          AGENT_TIMEOUT_MS
+        );
+      });
+
+      const update = await Promise.race([
+        nodeFn(state, model, stream, token),
+        timeout,
+      ]).finally(() => clearTimeout(timer!));
 
       const durationMs = Date.now() - start;
       logger.agentEnd(name, durationMs);
@@ -482,6 +506,16 @@ export function buildGraph(config: GraphConfig) {
 
         if (failedAgents.size >= 3) {
           stream.markdown(`\n\n> ⚠️ Too many agents failed (${failedAgents.size}). Finishing with available results.\n`);
+          state.status = "completed";
+          currentNode = "__end__";
+          steps++;
+          continue;
+        }
+
+        // If the supervisor itself failed (timeout, LLM error), finish gracefully.
+        // Routing through a broken supervisor would loop forever.
+        if (currentNode === "supervisor") {
+          stream.markdown(`\n\n> ⚠️ **Supervisor** failed — finishing with available results.\n`);
           state.status = "completed";
           currentNode = "__end__";
           steps++;

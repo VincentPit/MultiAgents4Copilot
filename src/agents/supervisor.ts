@@ -142,6 +142,17 @@ export async function supervisorNode(
     }
   }
 
+  // Auto-upgrade "coder" → "coder_pool" for complex multi-file/project tasks.
+  // The LLM sometimes picks "coder" for tasks that clearly need parallel coders.
+  if (agents.includes("coder") && !agents.includes("coder_pool")) {
+    const userMsg = state.messages.find(m => m.role === "user")?.content?.toLowerCase() ?? "";
+    const complexPatterns = /\b(build|create|upgrade|refactor|redesign|architect|scaffold|project|full.?stack|multi.?file|multi.?domain|app|application|website|platform|api|service|microservice)\b/;
+    if (complexPatterns.test(userMsg)) {
+      agents = agents.map(a => a === "coder" ? "coder_pool" : a);
+      logger.info("supervisor", `Auto-upgraded coder → coder_pool (complex task detected: "${userMsg.slice(0, 80)}")`);
+    }
+  }
+
   const isFinish = agents.length === 1 && agents[0] === "finish";
   const nextAgent = agents.join(","); // Store comma-separated for router
 
