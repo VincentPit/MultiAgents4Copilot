@@ -143,7 +143,9 @@ export async function runLintValidation(
   // Scope to specific files if eslint is available
   let command = baseCommand;
   if (files && files.length > 0 && baseCommand.includes("eslint")) {
-    const fileArgs = files.map(f => `"${f}"`).join(" ");
+    // Shell-escape file paths to prevent injection via crafted filenames
+    const safeFiles = files.map(f => f.replace(/[^a-zA-Z0-9._\-\/]/g, ""));
+    const fileArgs = safeFiles.filter(f => f.length > 0).map(f => `"${f}"`).join(" ");
     command = `npx eslint ${fileArgs} --no-error-on-unmatched-pattern`;
   } else if (baseCommand.includes("eslint")) {
     command = `npx eslint src --ext ts,tsx,js,jsx --no-error-on-unmatched-pattern`;

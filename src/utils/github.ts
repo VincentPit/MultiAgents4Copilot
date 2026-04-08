@@ -83,8 +83,12 @@ export async function searchGitHubRepos(
   const url = `${GITHUB_API}/search/repositories?${params}`;
   logger.info("github", `Searching: ${query}`);
 
+  // Abort if the request takes longer than 10 seconds
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10_000);
+
   try {
-    const res = await fetch(url, { headers });
+    const res = await fetch(url, { headers, signal: controller.signal });
 
     const rateRemaining = res.headers.get("x-ratelimit-remaining")
       ? Number(res.headers.get("x-ratelimit-remaining"))
@@ -122,6 +126,8 @@ export async function searchGitHubRepos(
   } catch (err: any) {
     logger.error("github", `Fetch failed: ${err.message}`);
     return { totalCount: 0, repos: [], query, rateRemaining: null };
+  } finally {
+    clearTimeout(timeout);
   }
 }
 

@@ -17,6 +17,9 @@ const SCHEME = "agent-diff";
 let _contentProvider: vscode.Disposable | null = null;
 const _contentStore: Map<string, string> = new Map();
 
+/** Maximum entries in the in-memory content store to prevent memory leaks. */
+export const MAX_DIFF_STORE_SIZE = 50;
+
 /**
  * Register the in-memory content provider.
  * Must be called once at activation (or lazily on first diff).
@@ -64,6 +67,11 @@ export async function showFileDiff(
 
     // Store old content in the in-memory provider
     const key = `/${relPath}`;
+    // Evict oldest entries if store exceeds cap
+    if (_contentStore.size >= MAX_DIFF_STORE_SIZE) {
+      const oldest = _contentStore.keys().next().value;
+      if (oldest !== undefined) { _contentStore.delete(oldest); }
+    }
     _contentStore.set(key, oldContent);
     const oldUri = vscode.Uri.parse(`${SCHEME}:${key}`);
 

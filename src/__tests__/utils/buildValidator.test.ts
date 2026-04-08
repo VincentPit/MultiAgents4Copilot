@@ -10,6 +10,8 @@ import {
   parseDiagnostics,
   formatBuildErrorsForLLM,
   filterErrorsForFiles,
+  BUILD_TIMEOUT_MS,
+  MAX_OUTPUT_SIZE,
   type BuildDiagnostic,
   type BuildResult,
 } from "../../utils/buildValidator";
@@ -706,5 +708,29 @@ describe("Robustness edge cases", () => {
     // Exact match
     const filteredExact = filterErrorsForFiles(result, ["src/App.tsx"]);
     expect(filteredExact).toHaveLength(1);
+  });
+});
+
+// ── Exported constants ───────────────────────────────────────────────
+
+describe("BUILD_TIMEOUT_MS", () => {
+  it("is exported as a positive number", () => {
+    expect(BUILD_TIMEOUT_MS).toBeGreaterThan(0);
+    expect(typeof BUILD_TIMEOUT_MS).toBe("number");
+  });
+
+  it("equals 30 seconds", () => {
+    expect(BUILD_TIMEOUT_MS).toBe(30_000);
+  });
+});
+
+describe("MAX_OUTPUT_SIZE", () => {
+  it("is exported as a positive number", () => {
+    expect(MAX_OUTPUT_SIZE).toBeGreaterThan(0);
+    expect(typeof MAX_OUTPUT_SIZE).toBe("number");
+  });
+
+  it("equals 50KB", () => {
+    expect(MAX_OUTPUT_SIZE).toBe(50 * 1024);
   });
 });
