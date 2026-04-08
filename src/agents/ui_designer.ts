@@ -7,6 +7,9 @@ import { AgentState, AgentMessage, postAgentMessage, getMessagesFor } from "../g
 import { callModel, selectModel, MODELS, buildMessages, capContext } from "./base";
 import { logger } from "../utils/logger";
 
+/** Maximum characters stored for a design response in state. */
+export const MAX_DESIGN_CHARS = 6_000;
+
 const SYSTEM_PROMPT = `You are a senior UI/UX designer and front-end architect.
 Design user interfaces: components, layouts, colours, responsive behaviour, accessibility.
 
@@ -71,8 +74,8 @@ export async function uiDesigner(
 
   const response = await callModel(activeModel, messages, stream, token, "ui_designer");
 
-  const cappedResponse = response.length > 6000
-    ? response.slice(0, 6000) + "\n[... design truncated in state]"
+  const cappedResponse = response.length > MAX_DESIGN_CHARS
+    ? response.slice(0, MAX_DESIGN_CHARS) + "\n[... design truncated in state]"
     : response;
 
   const newMessage: AgentMessage = {
@@ -86,10 +89,9 @@ export async function uiDesigner(
     `UI design produced. Components for tests:\n${capContext(response, 4_000)}`);
   logger.agentMessage("ui_designer", "*", "Design spec posted to message bus");
 
-  // Extract only code blocks from the response for last_code artifact,
-  // so the reviewer reviews actual code, not design prose
+  // Extract code blocks — handles language tags (```tsx, ```css, etc.) and blocks at end of string
   const codeBlocks: string[] = [];
-  const codeBlockRegex = /```[\w]*\n([\s\S]*?)```/g;
+  const codeBlockRegex = /```[\w.+-]*\s*\n([\s\S]*?)```/g;
   let codeMatch;
   while ((codeMatch = codeBlockRegex.exec(response)) !== null) {
     if (codeMatch[1]?.trim()) { codeBlocks.push(codeMatch[1].trim()); }

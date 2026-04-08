@@ -7,6 +7,9 @@ import { AgentState } from "../graph/state";
 import { callModel, buildMessages } from "./base";
 import { logger } from "../utils/logger";
 
+/** Maximum characters for the supervisor's routing question. */
+const MAX_QUESTION_CHARS = 4_000;
+
 const SYSTEM_PROMPT = `You are the Supervisor of a multi-agent coding team.
 
 Your team:
@@ -95,10 +98,15 @@ export async function supervisorNode(
     `Last output: ${lastSnippet}\n` +
     `Which agent(s) next? Use commas for parallel work.`;
 
+  // Cap the routing question to avoid bloating the LLM call
+  const cappedQuestion = question.length > MAX_QUESTION_CHARS
+    ? question.slice(0, MAX_QUESTION_CHARS) + "\n[… question truncated]"
+    : question;
+
   const messages = buildMessages({
     systemPrompt: SYSTEM_PROMPT,
     chatHistory: state.chatHistory,
-    userQuestion: question,
+    userQuestion: cappedQuestion,
     maxSystemChars: 2_000,
     maxWorkspaceChars: 0,
   });
