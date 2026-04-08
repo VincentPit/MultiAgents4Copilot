@@ -2,7 +2,7 @@
  * Tests for src/utils/terminalRunner.ts — command-block parser.
  */
 
-import { parseCommandBlocks, type ParsedCommand } from "../../utils/terminalRunner";
+import { parseCommandBlocks, isBlocked, isAutoApprovable, type ParsedCommand } from "../../utils/terminalRunner";
 
 describe("parseCommandBlocks", () => {
   it("returns empty array when there are no code blocks", () => {
@@ -213,5 +213,52 @@ describe("runCommandsFromOutput — blocked commands", () => {
     // Not blocked — only declined by user
     const blockedSkips = result.skipped.filter(s => s.reason.includes("blocked"));
     expect(blockedSkips).toHaveLength(0);
+  });
+});
+
+// ── isBlocked / isAutoApprovable exports ─────────────────────────────
+
+describe("isBlocked", () => {
+  it("is exported as a function", () => {
+    expect(typeof isBlocked).toBe("function");
+  });
+
+  it("returns true for rm -rf /", () => {
+    expect(isBlocked("rm -rf /")).toBe(true);
+  });
+
+  it("returns true for fork bombs", () => {
+    expect(isBlocked(":(){ :|:& };:")).toBe(true);
+  });
+
+  it("returns false for safe commands", () => {
+    expect(isBlocked("npm install express")).toBe(false);
+    expect(isBlocked("echo hello")).toBe(false);
+  });
+
+  it("returns true for mkfs commands", () => {
+    expect(isBlocked("mkfs.ext4 /dev/sda1")).toBe(true);
+  });
+});
+
+describe("isAutoApprovable", () => {
+  it("is exported as a function", () => {
+    expect(typeof isAutoApprovable).toBe("function");
+  });
+
+  it("returns true for npm install", () => {
+    expect(isAutoApprovable("npm install")).toBe(true);
+  });
+
+  it("returns true for mkdir", () => {
+    expect(isAutoApprovable("mkdir src/components")).toBe(true);
+  });
+
+  it("returns false for curl commands", () => {
+    expect(isAutoApprovable("curl https://example.com")).toBe(false);
+  });
+
+  it("returns false for destructive commands", () => {
+    expect(isAutoApprovable("rm -rf node_modules")).toBe(false);
   });
 });

@@ -33,6 +33,9 @@ const BLOCKED_EXTENSIONS = new Set(
 /** Maximum file content size agents can write (5 MB). */
 const MAX_FILE_SIZE = getSecurityConfig().fileWriter.maxFileSizeBytes;
 
+/** Maximum number of file blocks to parse from a single LLM response. */
+export const MAX_FILE_BLOCKS = 30;
+
 // ── Types ────────────────────────────────────────────────────────────
 
 export interface ParsedFileBlock {
@@ -120,6 +123,12 @@ export function parseFileBlocks(llmOutput: string): ParsedFileBlock[] {
     const language = langAnnotation.split(":")[0] || guessLanguage(filePath);
 
     blocks.push({ filePath, content: codeContent, language });
+
+    // Safety: cap number of blocks to prevent unbounded parsing
+    if (blocks.length >= MAX_FILE_BLOCKS) {
+      logger.warn("fileWriter", `Reached MAX_FILE_BLOCKS (${MAX_FILE_BLOCKS}) — stopping parse`);
+      break;
+    }
   }
 
   logger.info("fileWriter", `Parsed ${blocks.length} file block(s) from LLM output`);

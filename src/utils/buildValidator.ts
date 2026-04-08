@@ -52,10 +52,10 @@ export interface BuildResult {
 // ── Build command detection ──────────────────────────────────────────
 
 /** Max timeout for a build validation step (30s — just checking, not full build). */
-const BUILD_TIMEOUT_MS = 30_000;
+export const BUILD_TIMEOUT_MS = 30_000;
 
 /** Max output to capture (50 KB). */
-const MAX_OUTPUT_SIZE = 50 * 1024;
+export const MAX_OUTPUT_SIZE = 50 * 1024;
 
 /**
  * Detect the appropriate build/check command for the workspace.

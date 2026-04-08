@@ -187,13 +187,13 @@ const AUTO_APPROVE_PATTERNS: RegExp[] = [
 ];
 
 /** Check if a command matches the auto-approve list. */
-function isAutoApprovable(command: string): boolean {
+export function isAutoApprovable(command: string): boolean {
   const trimmed = command.trim();
   return AUTO_APPROVE_PATTERNS.some(pattern => pattern.test(trimmed));
 }
 
 /** Check if a command is blocked for safety. */
-function isBlocked(command: string): boolean {
+export function isBlocked(command: string): boolean {
   // Length check first
   if (command.length > MAX_COMMAND_LENGTH) {
     logger.warn("terminalRunner", `Command too long (${command.length} chars > ${MAX_COMMAND_LENGTH})`);

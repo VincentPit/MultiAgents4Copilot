@@ -2,7 +2,7 @@
  * Tests for src/utils/fileWriter.ts — code-block parser.
  */
 
-import { parseFileBlocks, type ParsedFileBlock } from "../../utils/fileWriter";
+import { parseFileBlocks, MAX_FILE_BLOCKS, type ParsedFileBlock } from "../../utils/fileWriter";
 
 describe("parseFileBlocks", () => {
   it("returns empty array when there are no code blocks", () => {
@@ -257,5 +257,36 @@ describe("writeFileBlocks — security hardening", () => {
     const result = await writeFileBlocks(blocks, stream);
     expect(result.written).toHaveLength(2); // app.ts and utils.ts
     expect(result.skipped).toHaveLength(2); // evil.exe and ../escape.txt
+  });
+});
+
+// ── MAX_FILE_BLOCKS constant ─────────────────────────────────────────
+
+describe("MAX_FILE_BLOCKS", () => {
+  it("is exported as a positive number", () => {
+    expect(MAX_FILE_BLOCKS).toBeGreaterThan(0);
+    expect(typeof MAX_FILE_BLOCKS).toBe("number");
+  });
+
+  it("equals 30", () => {
+    expect(MAX_FILE_BLOCKS).toBe(30);
+  });
+});
+
+describe("parseFileBlocks cap", () => {
+  it("caps output at MAX_FILE_BLOCKS entries", () => {
+    // Build an LLM output with more blocks than the cap
+    const lines: string[] = [];
+    for (let i = 0; i < MAX_FILE_BLOCKS + 10; i++) {
+      lines.push(
+        `### \`src/file${i}.ts\``,
+        "```typescript",
+        `export const x${i} = ${i};`,
+        "```",
+        "",
+      );
+    }
+    const blocks = parseFileBlocks(lines.join("\n"));
+    expect(blocks.length).toBeLessThanOrEqual(MAX_FILE_BLOCKS);
   });
 });
