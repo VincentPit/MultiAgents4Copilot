@@ -1,14 +1,9 @@
 /**
  * Base agent utilities — model selection, fallback, and calling helpers.
  *
- * Supports multiple models through vscode.lm:
- *   • Claude Opus 4.6 — default for most agents
- *   • Gemini 3 Pro    — used by the UI designer agent
- *
- * If the primary model fails, automatically falls back to another available model.
- *
- * Upgraded: uses LanguageModelError for typed error handling,
- * improved token budget heuristics, and better retry backoff.
+ * Single-model setup: every agent uses GPT-4.1 via vscode.lm.
+ * If GPT-4.1 itself is unavailable we fall back to whatever Copilot model
+ * the user has access to as a last resort.
  */
 
 import * as vscode from "vscode";
@@ -23,14 +18,12 @@ export interface ModelSpec {
 }
 
 export const MODELS = {
-  claudeOpus: { vendor: "copilot", family: "claude-opus-4.6", label: "Claude Opus 4.6" } as ModelSpec,
-  gemini3Pro: { vendor: "copilot", family: "gemini-3-pro",   label: "Gemini 3 Pro" }   as ModelSpec,
+  gpt41: { vendor: "copilot", family: "gpt-4.1", label: "GPT-4.1" } as ModelSpec,
 };
 
-/** Default fallback order when a model isn't available. */
+/** Default fallback order — GPT-4.1 only. Last-resort "any copilot" handled separately. */
 const FALLBACK_ORDER: ModelSpec[] = [
-  MODELS.claudeOpus,
-  MODELS.gemini3Pro,
+  MODELS.gpt41,
 ];
 
 // ── Context budget ───────────────────────────────────────────────────

@@ -174,37 +174,24 @@ describe("selectModel", () => {
     jest.clearAllMocks();
   });
 
-  it("returns the preferred model when available", async () => {
-    const mockModel = { name: "claude-opus-4.6" };
+  it("returns the preferred GPT-4.1 model when available", async () => {
+    const mockModel = { name: "gpt-4.1" };
     mockSelectChatModels.mockResolvedValueOnce([mockModel]);
 
-    const result = await selectModel(MODELS.claudeOpus);
+    const result = await selectModel(MODELS.gpt41);
     expect(result).not.toBeNull();
     expect(result!.model).toBe(mockModel);
-    expect(result!.spec.family).toBe("claude-opus-4.6");
+    expect(result!.spec.family).toBe("gpt-4.1");
   });
 
-  it("falls back to another model when preferred is unavailable", async () => {
-    const fallbackModel = { name: "gemini-3-pro" };
-    // First call (preferred) returns empty, second (fallback) returns model
-    mockSelectChatModels
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([fallbackModel]);
-
-    const result = await selectModel(MODELS.claudeOpus);
-    expect(result).not.toBeNull();
-    expect(result!.model).toBe(fallbackModel);
-  });
-
-  it("tries any copilot model as last resort", async () => {
+  it("tries any copilot model as last resort when GPT-4.1 is unavailable", async () => {
     const anyModel = { name: "some-model" };
-    // Preferred and all fallbacks fail, but "any copilot" works
+    // GPT-4.1 unavailable → fallback chain has no other entries → "any copilot"
     mockSelectChatModels
-      .mockResolvedValueOnce([])   // preferred
-      .mockResolvedValueOnce([])   // fallback
+      .mockResolvedValueOnce([])         // preferred (gpt-4.1)
       .mockResolvedValueOnce([anyModel]); // any copilot
 
-    const result = await selectModel(MODELS.claudeOpus);
+    const result = await selectModel(MODELS.gpt41);
     expect(result).not.toBeNull();
     expect(result!.model).toBe(anyModel);
   });
@@ -212,7 +199,7 @@ describe("selectModel", () => {
   it("returns null when no models are available at all", async () => {
     mockSelectChatModels.mockResolvedValue([]);
 
-    const result = await selectModel(MODELS.claudeOpus);
+    const result = await selectModel(MODELS.gpt41);
     expect(result).toBeNull();
   });
 });

@@ -54,7 +54,7 @@ describe("logger", () => {
   });
 
   it("logs fallback activation", () => {
-    logger.fallback("coder", "rate limited", "gemini-3-pro");
+    logger.fallback("coder", "rate limited", "gpt-4.1");
     expect(vscode.window.createOutputChannel).toHaveBeenCalled();
   });
 

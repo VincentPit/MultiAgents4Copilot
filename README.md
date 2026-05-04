@@ -24,7 +24,7 @@ A **graph-based multi-agent system** that runs inside the VS Code Copilot chat p
 | **Full CI Pipeline** | The Integrator (staff engineer) merges all domains and runs `runFullQualityGate` on the whole project |
 | **Scaffold Generation** | Planner produces a project scaffold (directory tree + boilerplate) before domain coders begin coding |
 | **CI-Aware Code Review** | Reviewer sees build/lint/test status badges — CI failures are blocking issues |
-| **Multi-Model** | Claude Opus 4.6 (default) + Gemini 3 Pro (UI design) with automatic fallback |
+| **Single-Model (GPT-4.1)** | All agents use GPT-4.1 via the Copilot LM API; falls back to any available Copilot model only if GPT-4.1 itself is unavailable |
 | **Inter-Agent Communication** | Shared message bus — agents post context for each other |
 | **GitHub Repo Search** | Researcher searches GitHub for professional reference repos matching your idea |
 | **DAG Graph Orchestration** | State-machine executor with conditional routing, parallel fan-out, and plan-driven decomposition |
@@ -49,7 +49,7 @@ A **graph-based multi-agent system** that runs inside the VS Code Copilot chat p
                            ▼
                     ┌──────────────┐
                     │  Supervisor  │  🧠 Routes & checks quality status
-                    │ (Claude Opus)│
+                    │   (GPT-4.1)  │
                     └──────┬───────┘
                            │
            ┌───────────────┼───────────────┐
@@ -115,15 +115,15 @@ When Go is unavailable the system falls back to Node.js `Promise.allSettled` wit
 
 | Agent | Model | Icon | Purpose |
 |-------|-------|------|---------|
-| **Supervisor** | Claude Opus 4.6 | 🧠 | Reads quality summaries & conversation, routes to the right agent |
-| **Planner** | Claude Opus 4.6 | 📋 | Breaks complex tasks into numbered steps + scaffold + domain decomposition |
-| **Coder** | Claude Opus 4.6 | 💻 | Writes code → runs quality gate → self-reviews own diff → iterates until LGTM |
-| **Coder Pool** | Claude Opus 4.6 | 💻×N | Parallel domain coders (2–6, hard cap) via Go goroutines, independent QA per domain |
-| **Integrator** | Claude Opus 4.6 | 🏗️ | Staff engineer — merges all domains, runs full CI pipeline, fixes cross-domain breaks |
-| **Researcher** | Claude Opus 4.6 | 🔍 | Gathers information, explains concepts, **searches GitHub** for reference repos |
-| **UI Designer** | Gemini 3 Pro | 🎨 | Designs components, layouts, styling, and accessibility |
-| **Test Generator** | Claude Opus 4.6 | 🧪 | Generates unit tests, integration tests, and test suites |
-| **Reviewer** | Claude Opus 4.6 | ✅ | CI-aware code review — sees build/lint/test status, blocks on CI failures |
+| **Supervisor** | GPT-4.1 | 🧠 | Reads quality summaries & conversation, routes to the right agent |
+| **Planner** | GPT-4.1 | 📋 | Breaks complex tasks into numbered steps + scaffold + domain decomposition |
+| **Coder** | GPT-4.1 | 💻 | Writes code → runs quality gate → self-reviews own diff → iterates until LGTM |
+| **Coder Pool** | GPT-4.1 | 💻×N | Parallel domain coders (2–6, hard cap) via Go goroutines, independent QA per domain |
+| **Integrator** | GPT-4.1 | 🏗️ | Staff engineer — merges all domains, runs full CI pipeline, fixes cross-domain breaks |
+| **Researcher** | GPT-4.1 | 🔍 | Gathers information, explains concepts, **searches GitHub** for reference repos |
+| **UI Designer** | GPT-4.1 | 🎨 | Designs components, layouts, styling, and accessibility |
+| **Test Generator** | GPT-4.1 | 🧪 | Generates unit tests, integration tests, and test suites |
+| **Reviewer** | GPT-4.1 | ✅ | CI-aware code review — sees build/lint/test status, blocks on CI failures |
 
 ### Inter-Agent Communication Flow
 
@@ -167,7 +167,7 @@ MultiAgentCopilt/
 │   │   ├── coderPool.ts          # Go-powered parallel domain coders (MAX_DOMAINS=6)
 │   │   ├── integrator.ts         # Staff engineer — merge + full CI pipeline
 │   │   ├── researcher.ts         # Research + GitHub repo search
-│   │   ├── ui_designer.ts        # UI/UX design (Gemini 3 Pro)
+│   │   ├── ui_designer.ts        # UI/UX design (GPT-4.1)
 │   │   ├── tester.ts             # Test generation
 │   │   └── reviewer.ts           # CI-aware code review with APPROVE/REVISE
 │   ├── go-worker/                # Go child process for true parallelism
@@ -219,7 +219,7 @@ MultiAgentCopilt/
 - **GitHub Copilot Chat** extension installed and signed in
 - **Node.js** ≥ 18
 - **Go** ≥ 1.22 *(optional — falls back to JS parallelism if missing)*
-- A **GitHub Copilot subscription** (provides access to Claude Opus 4.6 and Gemini 3 Pro)
+- A **GitHub Copilot subscription** (provides access to GPT-4.1)
 
 ### Install from Source
 
@@ -346,16 +346,14 @@ The extension uses the `vscode.lm` API — **no API keys needed**. Models are ac
 
 | Model | Used By | Fallback |
 |-------|---------|----------|
-| Claude Opus 4.6 | Supervisor, Planner, Coder, Researcher, Reviewer, Test Generator | → Gemini 3 Pro → any Copilot model |
-| Gemini 3 Pro | UI Designer | → Claude Opus 4.6 → any Copilot model |
+| GPT-4.1 | All agents (Supervisor, Planner, Coder, Coder Pool, Integrator, Researcher, Reviewer, UI Designer, Test Generator) | → any available Copilot model |
 
 ### Fallback Chain
 
-If a model is unavailable or fails:
+If GPT-4.1 is unavailable or fails:
 
-1. **Retry** the same model (up to 2 attempts with backoff)
-2. **Fall back** to the next model in the chain
-3. **Last resort** — use any available Copilot model
+1. **Retry** GPT-4.1 (up to 2 attempts with backoff)
+2. **Last resort** — use any available Copilot model
 
 ---
 
@@ -365,14 +363,14 @@ Open the Output panel (**⌘+Shift+U**) and select **"Multi-Agent Copilot"** fro
 
 ```
 [12:34:56] [INFO]  [extension] Multi-Agent Copilot activated
-[12:34:58] [INFO]  [model] Selected Claude Opus 4.6
+[12:34:58] [INFO]  [model] Selected GPT-4.1
 [12:34:58] [START] [supervisor]
 [12:34:59] [END]   [supervisor] 1.2s
 [12:34:59] [ROUTE] supervisor → planner
 [12:34:59] [START] [planner]
 [12:35:03] [END]   [planner] 4.1s
 [12:35:03] [MSG]   coder → * : Code posted to message bus
-[12:35:10] [FALLBACK] ui_designer: gemini-3-pro unavailable → Claude Opus 4.6
+[12:35:10] [FALLBACK] coder: gpt-4.1 unavailable → any copilot model
 ```
 
 ---

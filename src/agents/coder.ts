@@ -32,6 +32,13 @@ export const CODER_MAX_FIX_RETRIES = 2;
 /** Max chars kept in state for capped LLM response. */
 export const MAX_CODER_RESPONSE_CHARS = 6000;
 
+/**
+ * If the diff is smaller than this (counted in +/− lines) AND self-review
+ * said LGTM AND the quality gate is green, the standalone Reviewer agent
+ * is skipped — it would just duplicate the self-review.
+ */
+export const SKIP_REVIEWER_MAX_DIFF_LINES = 50;
+
 const SYSTEM_PROMPT = `You are the Coder agent — an expert software engineer who writes real files.
 
 CRITICAL FORMAT RULES — follow these exactly so your code is applied to the workspace:
@@ -198,6 +205,10 @@ export async function coderNode(
   let qaReport: QualityGateResult | null = null;
   let lastResponse = response;
 
+  // Tracks whether the self-review LLM responded with a clean LGTM (no fix
+  // files written). Used to gate the skip_reviewer signal below.
+  let selfReviewLGTM = false;
+
   if (writtenFiles.length > 0) {
     const wsRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
     if (wsRoot) {
@@ -298,9 +309,25 @@ export async function coderNode(
             }
           } else {
             stream.markdown(`\n> ✅ **Self-review: LGTM** — code looks clean.\n`);
+            selfReviewLGTM = true;
           }
         }
       }
+    }
+  }
+
+  // ── Decide whether the standalone Reviewer can be skipped ──
+  // If the coder's own self-review passed cleanly, the quality gate is green,
+  // and the diff is small, the standalone Reviewer would just be a duplicate
+  // LLM call. Mark the run as eligible to skip it.
+  let skipReviewer = false;
+  if (selfReviewLGTM && qaReport?.passed) {
+    const diffLines = qaReport.diff
+      ? qaReport.diff.split("\n").filter(l => l.startsWith("+") || l.startsWith("-")).length
+      : 0;
+    if (diffLines > 0 && diffLines < SKIP_REVIEWER_MAX_DIFF_LINES) {
+      skipReviewer = true;
+      logger.info("coder", `skip_reviewer=true (LGTM + green CI + ${diffLines} diff lines)`);
     }
   }
 
@@ -351,6 +378,7 @@ export async function coderNode(
       ...(qaReport?.tests ? { test_results: qaReport.tests.success ? `passed:${qaReport.tests.passed}/${qaReport.tests.total}` : `failed:${qaReport.tests.failed}/${qaReport.tests.total}` } : {}),
       ...(qaReport?.lint ? { lint_results: qaReport.lint.success ? "passed" : `errors:${qaReport.lint.errorCount}` } : {}),
       ...(qaReport && !qaReport.passed ? { quality_errors: formatQualityReportForLLM(qaReport) } : {}),
+      ...(skipReviewer ? { skip_reviewer: "true" } : {}),
     },
     terminalResults,
   };

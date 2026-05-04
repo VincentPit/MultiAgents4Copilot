@@ -22,6 +22,7 @@ import * as path from "path";
 import { logger } from "./logger";
 import { getSecurityConfig } from "../security/securityConfig";
 import { isExtensionOwnFile, selfProtectionBlockReason } from "./selfProtection";
+import { clearFileReadCache } from "./fileReader";
 
 // ── Safety constants ────────────────────────────────────────────────────────
 
@@ -438,5 +439,11 @@ export async function applyCodeToWorkspace(
     return { written: [], skipped: [], oldContents: new Map() };
   }
 
-  return writeFileBlocks(blocks, stream, options);
+  const result = await writeFileBlocks(blocks, stream, options);
+  // Any successful write changes on-disk state — invalidate the file-read
+  // cache so downstream agents see the new contents.
+  if (result.written.length > 0) {
+    clearFileReadCache();
+  }
+  return result;
 }

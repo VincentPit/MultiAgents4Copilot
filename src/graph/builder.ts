@@ -632,7 +632,25 @@ export function buildGraph(config: GraphConfig) {
           state.planStep++;
         }
 
-        // Route back to supervisor after parallel batch
+        // If the plan still has tagged steps, chain straight to the next
+        // step without re-invoking the supervisor (saves an LLM round trip).
+        // Only fall back to the supervisor when the plan is exhausted or
+        // the next step has no agent tag.
+        if (state.plan.length > 0 && state.planStep < state.plan.length) {
+          const nextPlanRoute = routeFromPlan(state);
+          if (nextPlanRoute && nextPlanRoute.agents.length > 0) {
+            if (nextPlanRoute.parallel && nextPlanRoute.agents.length > 1) {
+              // Next step is itself parallel — let the loop fan out again.
+              state.pendingAgents = nextPlanRoute.agents;
+              currentNode = "supervisor"; // supervisor flushes pendingAgents into a parallel batch
+            } else {
+              currentNode = nextPlanRoute.agents[0];
+            }
+            continue;
+          }
+        }
+
+        // Plan exhausted (or untagged step) — let the supervisor decide finish vs. continue.
         currentNode = "supervisor";
       } else {
         // ── Sequential: single next agent ──
@@ -710,6 +728,20 @@ function determineRoute(
     const advancedStep = state.planStep + 1;
     state.planStep = advancedStep;
     logger.info("route", `Plan step advanced to ${advancedStep}/${state.plan.length}`);
+
+    // If the coder set skip_reviewer, also fast-forward past plan steps
+    // whose only agent is "reviewer" — they'd be a duplicate LLM call.
+    if (state.artifacts["skip_reviewer"] === "true") {
+      while (state.planStep < state.plan.length) {
+        const peek = routeFromPlan(state);
+        if (peek && peek.agents.length === 1 && peek.agents[0] === "reviewer") {
+          logger.info("route", `Skipping plan step ${state.planStep + 1} (reviewer) — skip_reviewer=true`);
+          state.planStep++;
+          continue;
+        }
+        break;
+      }
+    }
 
     if (state.planStep < state.plan.length) {
       const nextPlanRoute = routeFromPlan(state);

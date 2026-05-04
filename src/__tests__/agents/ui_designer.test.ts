@@ -9,7 +9,6 @@ const mockBuildMessages = jest.fn().mockReturnValue([
   vscode.LanguageModelChatMessage.User("mock message"),
 ]);
 const mockCallModel = jest.fn().mockResolvedValue("");
-const mockSelectModel = jest.fn().mockResolvedValue(null);
 const mockCapContext = jest.fn((s: string, n?: number) => s.slice(0, n ?? 20_000));
 
 jest.mock("../../agents/base.js", () => {
@@ -18,7 +17,6 @@ jest.mock("../../agents/base.js", () => {
     ...actual,
     buildMessages: mockBuildMessages,
     callModel: mockCallModel,
-    selectModel: mockSelectModel,
     capContext: mockCapContext,
   };
 });
@@ -62,20 +60,7 @@ describe("uiDesigner — model selection", () => {
     ]);
   });
 
-  it("uses Gemini 3 Pro when available", async () => {
-    const geminiModel = { name: "gemini-3-pro", sendRequest: jest.fn() };
-    mockSelectModel.mockResolvedValue({ model: geminiModel, spec: { label: "Gemini 3 Pro" } });
-    mockCallModel.mockResolvedValue("Design output");
-    const state = createInitialState("Design a button");
-
-    await uiDesigner(state, mockModel, mockStream(), mockToken());
-
-    // callModel should be called with the gemini model, not the fallback
-    expect(mockCallModel.mock.calls[0][0]).toBe(geminiModel);
-  });
-
-  it("falls back to provided model when Gemini is unavailable", async () => {
-    mockSelectModel.mockResolvedValue(null);
+  it("uses the provided GPT-4.1 model handle", async () => {
     mockCallModel.mockResolvedValue("Design output");
     const state = createInitialState("Design a button");
 
@@ -91,7 +76,6 @@ describe("uiDesigner — code block extraction", () => {
     mockBuildMessages.mockReturnValue([
       vscode.LanguageModelChatMessage.User("mock"),
     ]);
-    mockSelectModel.mockResolvedValue(null);
   });
 
   it("extracts code blocks into last_code artifact", async () => {
@@ -148,7 +132,6 @@ describe("uiDesigner — context building", () => {
     mockBuildMessages.mockReturnValue([
       vscode.LanguageModelChatMessage.User("mock"),
     ]);
-    mockSelectModel.mockResolvedValue(null);
     mockCallModel.mockResolvedValue("Design output");
   });
 
@@ -192,7 +175,6 @@ describe("uiDesigner — output", () => {
     mockBuildMessages.mockReturnValue([
       vscode.LanguageModelChatMessage.User("mock"),
     ]);
-    mockSelectModel.mockResolvedValue(null);
   });
 
   it("sets message role and name correctly", async () => {

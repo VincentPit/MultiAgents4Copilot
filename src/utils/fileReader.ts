@@ -89,6 +89,33 @@ function isBinaryPath(filePath: string): boolean {
   return BINARY_EXTENSIONS.has(ext);
 }
 
+// ── Request-scoped read cache ────────────────────────────────────────
+// Multiple agents within a single graph run frequently re-read the same
+// globs (coder revision loop, integrator re-reads written files, etc.).
+// We cache by (patterns + options) and invalidate whenever fileWriter
+// touches the workspace. The cache is module-scoped — callers should
+// invoke clearFileReadCache() at the start of each graph run.
+
+const _readCache = new Map<string, FileContent[]>();
+
+function cacheKey(patterns: string[], options?: ReadFilesOptions): string {
+  return JSON.stringify({
+    p: [...patterns].sort(),
+    f: options?.maxFiles ?? null,
+    c: options?.maxCharsPerFile ?? null,
+    t: options?.maxTotalChars ?? null,
+    e: options?.excludePattern ?? null,
+  });
+}
+
+/** Clear the file-read cache. Called by fileWriter after writes and at run start. */
+export function clearFileReadCache(): void {
+  if (_readCache.size > 0) {
+    logger.info("fileReader", `Cache invalidated (${_readCache.size} entries)`);
+    _readCache.clear();
+  }
+}
+
 // ── Core read functions ──────────────────────────────────────────────
 
 /**
@@ -101,6 +128,13 @@ export async function readFilesMatching(
   patterns: string[],
   options?: ReadFilesOptions
 ): Promise<FileContent[]> {
+  const key = cacheKey(patterns, options);
+  const cached = _readCache.get(key);
+  if (cached) {
+    logger.info("fileReader", `Cache hit for ${patterns.length} pattern(s) (${cached.length} files)`);
+    return cached;
+  }
+
   const maxFiles = options?.maxFiles ?? 30;
   const maxCharsPerFile = options?.maxCharsPerFile ?? 8_000;
   const maxTotalChars = options?.maxTotalChars ?? 60_000;
@@ -133,7 +167,9 @@ export async function readFilesMatching(
 
   logger.info("fileReader", `Found ${allUris.length} files matching ${patterns.length} pattern(s), reading ${capped.length}`);
 
-  return readUris(capped, wsRoot, maxCharsPerFile, maxTotalChars);
+  const result = await readUris(capped, wsRoot, maxCharsPerFile, maxTotalChars);
+  _readCache.set(key, result);
+  return result;
 }
 
 /**

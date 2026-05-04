@@ -28,6 +28,7 @@ import { registerExtensionRoot } from "./utils/selfProtection";
 import { registerDiffProvider, clearDiffStore } from "./utils/diffViewer";
 import { AgentOutputManager } from "./utils/agentOutputManager";
 import { MultiCoderViewManager } from "./utils/multiCoderView";
+import { clearFileReadCache } from "./utils/fileReader";
 
 const PARTICIPANT_ID = "multi-agent-copilot.team";
 
@@ -123,12 +124,16 @@ const handler: vscode.ChatRequestHandler = async (
     return;
   }
 
+  // 0b. Clear request-scoped caches so a new chat turn always sees fresh
+  //     workspace state (the previous turn may have written files).
+  clearFileReadCache();
+
   // 1. Use the model from the chat request (user's dropdown), fall back to explicit selection
   let model: vscode.LanguageModelChat | undefined = request.model;
   if (!model) {
     const [selected] = await vscode.lm.selectChatModels({
       vendor: "copilot",
-      family: "claude-opus-4.6",
+      family: "gpt-4.1",
     });
     model = selected;
   }

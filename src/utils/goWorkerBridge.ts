@@ -24,6 +24,7 @@ import { applyCodeToWorkspace } from "./fileWriter";
 import { runQualityGate, type QualityGateResult, formatQualityReportForLLM } from "./qualityGate";
 import { showBatchDiffs } from "./diffViewer";
 import { AgentOutputManager } from "./agentOutputManager";
+import { MultiCoderViewManager } from "./multiCoderView";
 import type { DomainAssignment, AgentState } from "../graph/state";
 
 // ── Types mirroring the Go protocol ──────────────────────────────────
@@ -300,21 +301,36 @@ export class GoWorkerBridge {
 
     this.outputMgr.append(`domain:${workerId}`, "🤖 Requesting code generation...");
 
+    // Stream the model's tokens into the per-domain webview panel so the user
+    // can see what the goroutine is generating in real time.
+    const multiView = MultiCoderViewManager.getInstance();
+    const sink = workerId ? multiView.liveSink(workerId) : undefined;
+    if (workerId) {
+      multiView.updateStatus(workerId, "coding", { phase: "calling GPT-4.1" });
+      multiView.appendLog(workerId, "🤖 Calling GPT-4.1 — streaming response below…");
+      multiView.appendLog(workerId, "──────────────────────────────");
+    }
+
     try {
       const messages = buildMessages({
         systemPrompt: systemPrompt,
         workspaceContext: this.state.workspaceContext,
         references: this.state.references,
-        chatHistory: this.state.chatHistory,
+        chatHistory: "",
         userQuestion: userMessage,
         maxSystemChars: 14_000,
-        maxWorkspaceChars: 6_000,
-        maxReferencesChars: 8_000,
+        maxWorkspaceChars: 2_500,
+        maxReferencesChars: 4_000,
       });
 
       const response = await callModel(
-        this.model, messages, null, this.token, `go-worker:${workerId}`
+        this.model, messages, null, this.token, `go-worker:${workerId}`, sink
       );
+      sink?.flush();
+      if (workerId) {
+        multiView.appendLog(workerId, "──────────────────────────────");
+        multiView.appendLog(workerId, `✅ Model response received (${response.length} chars)`);
+      }
 
       this.sendToWorker({
         type: "llm_response",
@@ -322,6 +338,10 @@ export class GoWorkerBridge {
         content: response,
       });
     } catch (err: any) {
+      sink?.flush();
+      if (workerId) {
+        multiView.appendLog(workerId, `❌ Model call failed: ${err?.message ?? String(err)}`);
+      }
       this.sendToWorker({
         type: "llm_response",
         id: id,
@@ -337,6 +357,12 @@ export class GoWorkerBridge {
    */
   private async handleFileWrite(msg: GoMessage): Promise<void> {
     const { id, workerId, filePath, content, language } = msg;
+    const multiView = MultiCoderViewManager.getInstance();
+
+    if (workerId) {
+      multiView.updateStatus(workerId, "writing", { phase: `writing ${filePath}` });
+      multiView.appendLog(workerId, `📁 Writing ${filePath}`);
+    }
 
     try {
       // Reconstruct LLM-style output for the existing parser
@@ -346,6 +372,12 @@ export class GoWorkerBridge {
       if (result.written.length > 0) {
         await showBatchDiffs(result.written, result.oldContents);
         this.outputMgr.append(`domain:${workerId}`, `📁 Wrote: ${filePath}`);
+        if (workerId) {
+          multiView.addFiles(workerId, result.written);
+          multiView.appendLog(workerId, `✅ Saved ${filePath}`);
+        }
+      } else if (result.skipped.length > 0 && workerId) {
+        multiView.appendLog(workerId, `⚠️ Skipped ${filePath}: ${result.skipped[0].reason}`);
       }
 
       this.sendToWorker({
@@ -355,6 +387,9 @@ export class GoWorkerBridge {
         error: result.skipped.length > 0 ? result.skipped[0].reason : undefined,
       });
     } catch (err: any) {
+      if (workerId) {
+        multiView.appendLog(workerId, `❌ Write failed for ${filePath}: ${err?.message ?? String(err)}`);
+      }
       this.sendToWorker({
         type: "file_write_response",
         id: id,
@@ -370,8 +405,13 @@ export class GoWorkerBridge {
    */
   private async handleTestRequest(msg: GoMessage, wsRoot: string): Promise<void> {
     const { id, workerId, files } = msg;
+    const multiView = MultiCoderViewManager.getInstance();
 
     this.outputMgr.append(`domain:${workerId}`, `🧪 Running tests for: ${files?.join(", ") ?? "all"}`);
+    if (workerId) {
+      multiView.updateStatus(workerId, "testing", { phase: "build + lint + tests" });
+      multiView.appendLog(workerId, `🧪 Quality gate running on ${files?.length ?? 0} file(s)…`);
+    }
 
     try {
       const qaResult: QualityGateResult = await runQualityGate(wsRoot, files ?? []);
@@ -380,6 +420,12 @@ export class GoWorkerBridge {
         ? `✅ All checks passed: ${qaResult.summary}`
         : `❌ Quality gate failed: ${qaResult.summary}\n${formatQualityReportForLLM(qaResult)}`;
 
+      if (workerId) {
+        multiView.appendLog(workerId, qaResult.passed
+          ? `✅ Quality gate passed — ${qaResult.summary}`
+          : `❌ Quality gate failed — ${qaResult.summary}`);
+      }
+
       this.sendToWorker({
         type: "test_response",
         id: id,
@@ -387,6 +433,9 @@ export class GoWorkerBridge {
         output: output,
       });
     } catch (err: any) {
+      if (workerId) {
+        multiView.appendLog(workerId, `❌ Quality gate threw: ${err?.message ?? String(err)}`);
+      }
       this.sendToWorker({
         type: "test_response",
         id: id,
@@ -405,6 +454,13 @@ export class GoWorkerBridge {
       : `domain:${workerId}`;
 
     this.outputMgr.append(channelName, `[${level?.toUpperCase() ?? "INFO"}] ${message}`);
+
+    // Mirror per-domain logs into the live multi-coder webview so the user
+    // can see goroutine activity without opening the Output panel.
+    if (workerId && workerId !== "main" && workerId !== "bridge") {
+      const prefix = level === "error" ? "❌" : level === "warn" ? "⚠️" : "•";
+      MultiCoderViewManager.getInstance().appendLog(workerId, `${prefix} ${message}`);
+    }
 
     // Also show important logs in the chat stream
     if (level === "error") {

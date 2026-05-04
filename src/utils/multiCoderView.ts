@@ -587,6 +587,15 @@ export class MultiCoderViewManager {
     MultiCoderViewManager._instance = null;
   }
 
+  /**
+   * Build an OutputSink that streams chunks into a coder's panel log,
+   * line by line. Use this when calling the LLM so the user sees what
+   * the model is generating in real time.
+   */
+  liveSink(domainId: string): LiveCoderSink {
+    return new LiveCoderSink(domainId, this);
+  }
+
   // ── Private rendering ──────────────────────────────────────────────
 
   private renderCoderPanel(state: CoderPanelState): void {
@@ -600,5 +609,42 @@ export class MultiCoderViewManager {
 
     const allStates = Array.from(this.coders.values());
     this.overviewPanel.webview.html = buildOverviewHtml(allStates);
+  }
+}
+
+/**
+ * Buffered OutputSink — accumulates streaming LLM chunks and pushes
+ * complete lines into the per-coder panel's log feed. Implements the
+ * `OutputSink` shape consumed by `callModel` in agents/base.ts.
+ */
+export class LiveCoderSink {
+  private buffer = "";
+  constructor(
+    private readonly domainId: string,
+    private readonly view: MultiCoderViewManager,
+  ) {}
+
+  append(chunk: string): void {
+    this.buffer += chunk;
+    if (!this.buffer.includes("\n")) { return; }
+    const lines = this.buffer.split("\n");
+    this.buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      const trimmed = line.trimEnd();
+      if (trimmed.length === 0) { continue; }
+      // Cap individual line length to prevent the panel from rendering
+      // a single 5000-char line that breaks the layout.
+      const safe = trimmed.length > 240 ? trimmed.slice(0, 237) + "…" : trimmed;
+      this.view.appendLog(this.domainId, safe);
+    }
+  }
+
+  /** Flush any unterminated final line. Call after the LLM call ends. */
+  flush(): void {
+    const tail = this.buffer.trimEnd();
+    this.buffer = "";
+    if (tail.length === 0) { return; }
+    const safe = tail.length > 240 ? tail.slice(0, 237) + "…" : tail;
+    this.view.appendLog(this.domainId, safe);
   }
 }

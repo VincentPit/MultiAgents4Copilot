@@ -4,7 +4,7 @@
 
 import * as vscode from "vscode";
 import { AgentState, AgentMessage, postAgentMessage, getMessagesFor } from "../graph/state";
-import { callModel, selectModel, MODELS, buildMessages, capContext } from "./base";
+import { callModel, buildMessages, capContext } from "./base";
 import { logger } from "../utils/logger";
 
 /** Maximum characters stored for a design response in state. */
@@ -30,15 +30,9 @@ export async function uiDesigner(
 ): Promise<Partial<AgentState>> {
   stream.markdown(`\n\n---\n#### \u{1F3A8} UI Designer \u{2014} Crafting the interface\n\n`);
 
-  // Prefer Gemini 3 Pro for design work
-  const designResult = await selectModel(MODELS.gemini3Pro);
-  const activeModel = designResult?.model ?? model;
-
-  if (designResult) {
-    logger.info("ui_designer", `Using preferred model: ${designResult.spec.label}`);
-  } else {
-    logger.fallback("ui_designer", "gemini-3-pro", model.name);
-  }
+  // Single-model setup: use the GPT-4.1 model handle passed in.
+  const activeModel = model;
+  logger.info("ui_designer", `Using model: ${model.name}`);
 
   // Build context block
   let contextBlock = "";

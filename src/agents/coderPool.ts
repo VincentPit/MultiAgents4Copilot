@@ -34,7 +34,7 @@ import {
   type BuildDiagnostic,
 } from "../utils/qualityGate";
 import { AgentOutputManager } from "../utils/agentOutputManager";
-import { MultiCoderViewManager } from "../utils/multiCoderView";
+import { MultiCoderViewManager, LiveCoderSink } from "../utils/multiCoderView";
 import { showBatchDiffs } from "../utils/diffViewer";
 import { GoWorkerBridge } from "../utils/goWorkerBridge";
 import {
@@ -411,7 +411,7 @@ on top of. These files are already written to disk:
 
 IMPORT from these files — do NOT redefine the types/interfaces they contain.
 If a type you need is already in the scaffold, import it from there.
-${scaffoldCode ? `\nScaffold contents (for reference):\n${capContext(scaffoldCode, 4_000)}` : ""}
+${scaffoldCode ? `\nScaffold contents (for reference):\n${capContext(scaffoldCode, 1_500)}` : ""}
 ` : ""}
 ═══════════════════════════════════════
 CRITICAL RULES
@@ -596,25 +596,40 @@ async function runSingleDomainCoder(
   const lastUserContent =
     [...state.messages].reverse().find((m) => m.role === "user")?.content ?? "";
 
+  // Per-domain coders: shrink shared blocks since each parallel call
+  // duplicates them. The domain-scoped existing-files block above already
+  // gives the coder its relevant context; the global workspace + references
+  // can be much smaller, and chatHistory adds little for coding tasks.
   const messages = buildMessages({
     systemPrompt: fullPrompt,
     workspaceContext: state.workspaceContext,
     references: state.references,
-    chatHistory: state.chatHistory,
+    chatHistory: "",
     userQuestion: lastUserContent,
     maxSystemChars: 14_000,
-    maxWorkspaceChars: 6_000,
-    maxReferencesChars: 8_000,
+    maxWorkspaceChars: 2_500,
+    maxReferencesChars: 4_000,
   });
+
+  // Stream LLM tokens into this domain's panel so the user can watch the
+  // model write code in real time. Lines are pushed into the panel log.
+  const multiView = MultiCoderViewManager.getInstance();
+  const sink = multiView.liveSink(domain.id);
+  multiView.appendLog(domain.id, "🤖 Calling GPT-4.1 — streaming response below…");
+  multiView.appendLog(domain.id, "──────────────────────────────");
 
   try {
     const response = await callModel(
       model,
       messages,
-      null, // no streaming — runs in parallel
+      null, // chat stream stays null — multiple coders run in parallel
       token,
-      `coder:${domain.id}`
+      `coder:${domain.id}`,
+      sink, // ← per-panel streaming output
     );
+    sink.flush();
+    multiView.appendLog(domain.id, "──────────────────────────────");
+    multiView.appendLog(domain.id, `✅ Model response received (${response.length} chars)`);
 
     return {
       domain,
@@ -622,6 +637,8 @@ async function runSingleDomainCoder(
       durationMs: Date.now() - start,
     };
   } catch (err: any) {
+    sink.flush();
+    multiView.appendLog(domain.id, `❌ Model call failed: ${err?.message ?? String(err)}`);
     return {
       domain,
       response: "",

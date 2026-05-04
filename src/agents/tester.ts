@@ -4,7 +4,7 @@
 
 import * as vscode from "vscode";
 import { AgentState, AgentMessage, postAgentMessage, getMessagesFor } from "../graph/state";
-import { callModel, selectModel, MODELS, buildMessages, capContext } from "./base";
+import { callModel, buildMessages, capContext } from "./base";
 import { logger } from "../utils/logger";
 import { applyCodeToWorkspace } from "../utils/fileWriter";
 import { runCommandsFromOutput, type CommandResult } from "../utils/terminalRunner";
@@ -61,15 +61,9 @@ export async function testGen(
   outputMgr.startRun("test_gen", taskSummary);
   outputMgr.reveal("test_gen");
 
-  // Prefer Claude Opus for test generation
-  const testResult = await selectModel(MODELS.claudeOpus);
-  const activeModel = testResult?.model ?? model;
-
-  if (testResult) {
-    logger.info("test_gen", `Using preferred model: ${testResult.spec.label}`);
-  } else {
-    logger.fallback("test_gen", "claude-opus-4.6", model.name);
-  }
+  // Single-model setup: use the GPT-4.1 model handle passed in.
+  const activeModel = model;
+  logger.info("test_gen", `Using model: ${model.name}`);
 
   // Build context
   let contextBlock = "";

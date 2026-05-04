@@ -153,6 +153,16 @@ export async function supervisorNode(
     }
   }
 
+  // Skip the standalone Reviewer when the coder already passed self-review +
+  // quality gate on a small diff. Coder sets `skip_reviewer = "true"` when
+  // those conditions are met. Saves a duplicate LLM round-trip.
+  if (state.artifacts["skip_reviewer"] === "true" && agents.includes("reviewer")) {
+    const before = agents.join(",");
+    agents = agents.filter(a => a !== "reviewer");
+    if (agents.length === 0) { agents = ["finish"]; }
+    logger.info("supervisor", `skip_reviewer flag set — overriding "${before}" → "${agents.join(",")}"`);
+  }
+
   const isFinish = agents.length === 1 && agents[0] === "finish";
   const nextAgent = agents.join(","); // Store comma-separated for router
 
