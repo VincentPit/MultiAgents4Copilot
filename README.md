@@ -7,7 +7,7 @@ A **graph-based multi-agent system** that runs inside the VS Code Copilot chat p
 ![Go](https://img.shields.io/badge/Go-1.22-00ADD8?logo=go&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-green)
 ![Agents](https://img.shields.io/badge/Agents-9-blueviolet)
-![Tests](https://img.shields.io/badge/Tests-401_passing-brightgreen)
+![Tests](https://img.shields.io/badge/Tests-683_passing-brightgreen)
 
 ---
 
@@ -17,9 +17,10 @@ A **graph-based multi-agent system** that runs inside the VS Code Copilot chat p
 |---------|-------------|
 | **9 Specialist Agents** | Supervisor, Planner, Coder, Coder Pool (parallel), Integrator, Researcher, UI Designer, Test Generator, Reviewer |
 | **Go Worker Parallelism** | Domain coders run as goroutines via a Go child process — true OS-level parallelism, not just `Promise.allSettled` |
-| **Live Webview Dashboard** | A side-by-side grid of domain cards opens automatically — live-scrolling logs and status badges per domain |
+| **Live Per-Coder Panels** | Each parallel domain coder gets its own webview panel with **streaming LLM output**, file-write events, and quality-gate results — watch every coder write code in real time |
 | **Meta-Style Quality Gates** | Every agent runs `build → lint → tests → diff` before marking code complete — like `arc diff` |
 | **Self-Review** | Coders review their own diffs (LLM checks for LGTM) before submitting — catches mistakes before review |
+| **Smart Reviewer Skip** | Standalone Reviewer is automatically skipped when self-review is LGTM, the quality gate is green, and the diff is under 50 lines — saves a duplicate LLM round-trip |
 | **Parallel Domain Coders** | Large tasks fan out to 2–6 independent domain coders, each with their own quality gate (hard cap enforced) |
 | **Full CI Pipeline** | The Integrator (staff engineer) merges all domains and runs `runFullQualityGate` on the whole project |
 | **Scaffold Generation** | Planner produces a project scaffold (directory tree + boilerplate) before domain coders begin coding |
@@ -28,8 +29,10 @@ A **graph-based multi-agent system** that runs inside the VS Code Copilot chat p
 | **Inter-Agent Communication** | Shared message bus — agents post context for each other |
 | **GitHub Repo Search** | Researcher searches GitHub for professional reference repos matching your idea |
 | **DAG Graph Orchestration** | State-machine executor with conditional routing, parallel fan-out, and plan-driven decomposition |
+| **Plan-Driven Chaining** | Once a plan exists, agents chain directly between tagged steps without round-tripping the Supervisor LLM — cuts latency and token cost |
+| **Request-Scoped File Cache** | `readFilesMatching` caches results within a single chat turn and invalidates on every workspace write — fewer redundant disk reads on revisions |
 | **No Per-Agent Timeouts** | Agents run to completion — only a 30-minute wall-clock guard prevents infinite runs |
-| **Retry + Fallback** | Each model call retries 2× then falls back through the model chain |
+| **Retry + Fallback** | Each model call retries up to 3× with backoff before falling back to any available Copilot model |
 | **Error Recovery** | If an agent crashes, the graph catches it, logs the run, and re-routes through the supervisor |
 | **Security Hardening** | Input validation, prompt-injection guards, output sanitisation, integrity checks |
 | **Structured Logging** | Full Output Channel with per-agent timing, routing, and fallback events |
@@ -311,32 +314,38 @@ This will:
 
 ---
 
-## 📊 Live Dashboard
+## 📊 Live Per-Coder Panels
 
-When parallel domain coders are active, a **webview panel** opens beside the editor:
+When parallel domain coders are active, the extension opens an **overview panel** plus an **individual webview panel for each coder**, distributed across editor columns. Every panel shows what its coder is doing in real time:
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│  🏢 Domain Coders Dashboard                                     │
-├──────────────────┬──────────────────┬────────────────────────────┤
-│  backend-api     │  frontend-ui     │  database-layer            │
-│  ● coding        │  ● coding        │  ● queued                  │
-│                  │                  │                            │
-│  📁 routes.ts    │  🎨 App.tsx      │  (waiting...)              │
-│  📁 auth.ts      │  📁 Dashboard.tsx│                            │
-│  🔨 Building...  │  📁 styles.css   │                            │
-│  ✅ Build pass   │  🔨 Building...  │                            │
-│  🧪 Tests: 8/8   │  ✅ Build pass   │                            │
-│                  │  🧪 Tests: 5/5   │                            │
-└──────────────────┴──────────────────┴────────────────────────────┘
+┌──────────────────────┐ ┌──────────────────────┐ ┌──────────────────────┐
+│ 🏗️ backend-api       │ │ 🏗️ frontend-ui       │ │ 🏗️ database-layer    │
+│ ● coding · 12.3s     │ │ ● writing · 9.1s     │ │ ● testing · 17.8s    │
+│ ▓▓▓▓▓▓░░░░ 40%       │ │ ▓▓▓▓▓▓▓▓░░ 65%       │ │ ▓▓▓▓▓▓▓▓▓░ 85%       │
+├──────────────────────┤ ├──────────────────────┤ ├──────────────────────┤
+│ 📂 Files (2)         │ │ 📂 Files (3)         │ │ 📂 Files (1)         │
+│  📄 src/routes.ts    │ │  📄 src/App.tsx      │ │  📄 src/db/client.ts │
+│  📄 src/auth.ts      │ │  📄 src/Dashboard.tsx│ │                      │
+│                      │ │  📄 src/styles.css   │ │ ✅ Test Results      │
+├──────────────────────┤ ├──────────────────────┤ │  All tests passed    │
+│ 📋 Output            │ │ 📋 Output            │ ├──────────────────────┤
+│ 🤖 Calling GPT-4.1…  │ │ 🤖 Calling GPT-4.1…  │ │ 📋 Output            │
+│ export async function│ │ const App = () =>    │ │ 🧪 Quality gate run… │
+│   listUsers(req,…    │ │   <Layout>…          │ │ ✅ Build: pass       │
+│ 📁 Writing routes.ts │ │ 📁 Writing App.tsx   │ │ ✅ Lint: pass        │
+│ ✅ Saved routes.ts   │ │ ✅ Saved App.tsx     │ │ ✅ Tests: 8/8        │
+└──────────────────────┘ └──────────────────────┘ └──────────────────────┘
 ```
 
-Each card shows:
-- **Status badge** — queued → coding → building → tests → done / failed
-- **Live-scrolling logs** — files written, build output, test results
-- **Auto-scroll** — logs scroll to the bottom as new lines arrive
+Each panel surfaces:
+- **Status + progress bar** — queued → coding → writing → testing → done / error.
+- **Live LLM token stream** — the model's output is piped line-by-line into the panel as it generates, so you can read the code being written in real time.
+- **File-write events** — `📁 Writing <path>` and `✅ Saved <path>` per file as each one lands on disk.
+- **Quality-gate verdict** — pass/fail summary + lint/test counts as soon as the gate finishes.
+- **Errors and warnings** — `❌` and `⚠️` markers for failed writes, model errors, or quality-gate failures.
 
-Updates are pushed via `postMessage` (single DOM mutations — no flicker or flooding).
+The overview panel ties them together with aggregate counts (`done/total`, `files written`) and refreshes every 2 seconds. Updates are pushed via incremental `postMessage` calls so the DOM stays smooth even with 6 panels open simultaneously.
 
 ---
 
