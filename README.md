@@ -201,7 +201,7 @@ MultiAgentCopilt/
 │       ├── selfProtection.ts     # Self-modification guards
 │       ├── integrity.ts          # State integrity checks
 │       └── workspace.ts          # Workspace utilities
-├── src/__tests__/                # 21 test suites, 401 tests
+├── src/__tests__/                # 36 test suites, 683 tests
 │   ├── agents/                   # Agent behaviour tests inc. quality gates
 │   ├── graph/                    # Graph builder, router, state tests
 │   ├── integration/              # File writer & terminal runner integration
