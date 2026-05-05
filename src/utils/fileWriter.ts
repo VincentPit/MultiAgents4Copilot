@@ -23,6 +23,7 @@ import { logger } from "./logger";
 import { getSecurityConfig } from "../security/securityConfig";
 import { isExtensionOwnFile, selfProtectionBlockReason } from "./selfProtection";
 import { clearFileReadCache } from "./fileReader";
+import { scanFileForSecrets, formatSecretMatches } from "./secretScan";
 
 // ── Safety constants ────────────────────────────────────────────────────────
 
@@ -371,6 +372,18 @@ export async function writeFileBlocks(
       result.skipped.push({ filePath: block.filePath, reason: `content too large (${block.content.length} bytes)` });
       logger.warn("fileWriter", `Skipped "${block.filePath}" — content ${block.content.length} bytes exceeds ${MAX_FILE_SIZE}`);
       stream.markdown(`\n> ⚠️ **Skipped:** \`${block.filePath}\` — file too large (${Math.round(block.content.length / 1024)}KB).\n`);
+      continue;
+    }
+
+    // Safety: regex-based secret scan. Tests/fixtures are exempt; per-line
+    // override available via `secret-scan: allow` comment marker.
+    const secretHits = scanFileForSecrets(block.filePath, block.content);
+    if (secretHits.length > 0) {
+      const summary = formatSecretMatches(secretHits);
+      const reason = `secret detected: ${summary}`;
+      result.skipped.push({ filePath: block.filePath, reason });
+      logger.warn("fileWriter", `Skipped "${block.filePath}" — ${reason}`);
+      stream.markdown(`\n> 🔒 **Blocked:** \`${block.filePath}\` — ${reason}\n`);
       continue;
     }
 

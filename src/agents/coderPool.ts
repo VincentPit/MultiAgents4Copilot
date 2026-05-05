@@ -974,6 +974,10 @@ async function runWithJSFallback(
             multiView.addFiles(domain.id, filesWritten);
             multiView.appendLog(domain.id, `📁 Wrote ${filesWritten.length} file(s): ${filesWritten.join(", ")}`);
           }
+          for (const s of writeResult.skipped) {
+            outputMgr.append(channelName, `❌ Blocked: ${s.filePath} — ${s.reason}`);
+            multiView.appendLog(domain.id, `❌ Blocked: ${s.filePath} — ${s.reason}`);
+          }
         } catch (err: any) {
           outputMgr.append(channelName, `⚠️ File write error: ${err?.message}`);
           multiView.appendLog(domain.id, `⚠️ File write error: ${err?.message}`);

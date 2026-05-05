@@ -430,7 +430,7 @@ describe("detectBuildCommand", () => {
     vscode.workspace.fs.readFile = jest.fn().mockRejectedValue(new Error("not found"));
   });
 
-  it("returns 'npx tsc --noEmit' when tsconfig.json exists", async () => {
+  it("returns the incremental tsc command when tsconfig.json exists", async () => {
     vscode.workspace.fs.stat.mockImplementation((uri: any) => {
       if (uri.fsPath?.includes("tsconfig.json") || uri.path?.includes("tsconfig.json")) {
         return Promise.resolve({ type: 1 }); // FileType.File
@@ -439,7 +439,7 @@ describe("detectBuildCommand", () => {
     });
 
     const cmd = await detectBuildCommand("/project");
-    expect(cmd).toBe("npx tsc --noEmit");
+    expect(cmd).toBe("npx tsc --noEmit --incremental --tsBuildInfoFile .tsbuildinfo-multiagent");
   });
 
   it("returns npm script command when package.json has typecheck script", async () => {
@@ -520,7 +520,7 @@ describe("detectBuildCommand", () => {
     });
 
     const cmd = await detectBuildCommand("/project");
-    expect(cmd).toBe("npx tsc --noEmit"); // tsconfig wins
+    expect(cmd).toBe("npx tsc --noEmit --incremental --tsBuildInfoFile .tsbuildinfo-multiagent"); // tsconfig wins over lint script
   });
 });
 

@@ -6,6 +6,7 @@ import * as vscode from "vscode";
 import { AgentState, AgentMessage, postAgentMessage } from "../graph/state";
 import { callModel, buildMessages, capContext } from "./base";
 import { logger } from "../utils/logger";
+import { readWrittenFiles, formatFilesForLLM } from "../utils/fileReader";
 
 export const MAX_REVIEWS = 3;
 
@@ -38,7 +39,6 @@ export async function reviewerNode(
     `#### \u{2705} Reviewer \u{2014} Code review (cycle ${cycle}/${MAX_REVIEWS})\n\n`
   );
 
-  const code = capContext(state.artifacts["last_code"] ?? "No code produced yet.", 12_000);
   const lastUserMsg = [...state.messages].reverse().find(m => m.role === "user")?.content ?? "";
 
   // Build CI context from artifacts (like seeing CI results on a PR page)
@@ -56,8 +56,40 @@ export async function reviewerNode(
     if (testResults) { ciContext += `\nTests: ${testResults}`; }
   }
 
-  // Build system prompt with code to review embedded
-  const sysPrompt = SYSTEM_PROMPT + ciContext + `\n\n## Code to Review\n\`\`\`\n${code}\n\`\`\``;
+  // Prefer the actual on-disk file contents (the integrator does the same).
+  // Falls back to last_code when written_files is missing or unreadable.
+  let codeBlock = "";
+  const writtenFilesStr = state.artifacts["written_files"];
+  if (writtenFilesStr) {
+    const paths = writtenFilesStr
+      .split(",")
+      .map(p => p.trim())
+      .filter(Boolean);
+    if (paths.length > 0) {
+      try {
+        const diskFiles = await readWrittenFiles(paths, {
+          maxFiles: 50,
+          maxCharsPerFile: 6_000,
+          maxTotalChars: 80_000,
+        });
+        if (diskFiles.length > 0) {
+          codeBlock = formatFilesForLLM(
+            diskFiles,
+            "Code to Review (current on-disk state)",
+          );
+          logger.info("reviewer", `Reviewing ${diskFiles.length} on-disk file(s)`);
+        }
+      } catch (err: any) {
+        logger.warn("reviewer", `Failed to read written files: ${err?.message}`);
+      }
+    }
+  }
+  if (!codeBlock) {
+    const code = capContext(state.artifacts["last_code"] ?? "No code produced yet.", 12_000);
+    codeBlock = `## Code to Review\n\`\`\`\n${code}\n\`\`\``;
+  }
+
+  const sysPrompt = SYSTEM_PROMPT + ciContext + `\n\n${codeBlock}`;
 
   const messages = buildMessages({
     systemPrompt: sysPrompt,
@@ -65,7 +97,7 @@ export async function reviewerNode(
     references: state.references,
     chatHistory: state.chatHistory,
     userQuestion: lastUserMsg || "Review the code above",
-    maxSystemChars: 16_000,
+    maxSystemChars: 40_000,
     maxWorkspaceChars: 8_000,
     maxReferencesChars: 10_000,
   });
