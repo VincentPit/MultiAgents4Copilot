@@ -39,6 +39,18 @@ export const MAX_CODER_RESPONSE_CHARS = 6000;
  */
 export const SKIP_REVIEWER_MAX_DIFF_LINES = 50;
 
+/**
+ * Below this diff size, self-review is skipped — the cost of an LLM call
+ * outweighs the chance of a real catch on a tiny change.
+ */
+export const SELF_REVIEW_MIN_DIFF_LINES = 30;
+
+/**
+ * Above this diff size, self-review is skipped — the LLM can't fit the
+ * full diff and tends to default to a useless "LGTM".
+ */
+export const SELF_REVIEW_MAX_DIFF_LINES = 500;
+
 const SYSTEM_PROMPT = `You are the Coder agent — an expert software engineer who writes real files.
 
 CRITICAL FORMAT RULES — follow these exactly so your code is applied to the workspace:
@@ -93,6 +105,63 @@ SELF-REVIEW CHECKLIST (apply to the diff below):
 
 If you find issues, output the corrected files using ### \`path\` format.
 If the code looks good, respond with exactly: "LGTM — no issues found."`;
+
+// ── Self-review helpers (shared with the coder pool) ─────────────────
+
+/** Count +/− content lines in a unified diff, ignoring file-header lines. */
+export function countDiffLines(diff: string): number {
+  if (!diff) { return 0; }
+  let count = 0;
+  for (const line of diff.split("\n")) {
+    if (
+      (line.startsWith("+") || line.startsWith("-")) &&
+      !line.startsWith("+++") &&
+      !line.startsWith("---")
+    ) {
+      count++;
+    }
+  }
+  return count;
+}
+
+export interface SelfReviewOutcome {
+  /** True if the review said LGTM (approved as-is). */
+  approved: boolean;
+  /** Raw LLM response. If !approved, may contain corrected file blocks. */
+  response: string;
+}
+
+/**
+ * Run one self-review LLM call against a diff. Caller is responsible for
+ * applying any returned fixes and re-validating with the quality gate.
+ *
+ * `stream` is intentionally `null` so parallel callers don't interleave
+ * tokens into the chat. The returned response is the entire model output.
+ */
+export async function runSelfReview(
+  model: vscode.LanguageModelChat,
+  diff: string,
+  workspaceContext: string,
+  token: vscode.CancellationToken,
+  agentLabel: string,
+): Promise<SelfReviewOutcome> {
+  const reviewMessages = buildMessages({
+    systemPrompt:
+      SELF_REVIEW_PROMPT +
+      `\n\n## Your Changes (diff)\n\`\`\`diff\n${diff.slice(0, 8000)}\n\`\`\``,
+    workspaceContext,
+    chatHistory: "",
+    userQuestion:
+      "Review the diff of your changes above. If you find issues, " +
+      "output corrected files using ### `path` format. If code looks good, say LGTM.",
+    maxSystemChars: 14_000,
+    maxWorkspaceChars: 4_000,
+  });
+
+  const response = await callModel(model, reviewMessages, null, token, agentLabel);
+  const approved = response.toUpperCase().includes("LGTM");
+  return { approved, response };
+}
 
 export async function coderNode(
   state: AgentState,
@@ -276,27 +345,18 @@ export async function coderNode(
           stream.markdown(`\n> 🔍 **Self-reviewing** changes before peer review…\n`);
           outputMgr.append("coder", "Self-reviewing changes…\n");
 
-          const reviewMessages = buildMessages({
-            systemPrompt: SELF_REVIEW_PROMPT +
-              `\n\n## Your Changes (diff)\n\`\`\`diff\n${diff.slice(0, 8000)}\n\`\`\``,
-            workspaceContext: state.workspaceContext,
-            chatHistory: "",
-            userQuestion: "Review the diff of your changes above. If you find issues, " +
-              "output corrected files using ### `path` format. If code looks good, say LGTM.",
-            maxSystemChars: 14_000,
-            maxWorkspaceChars: 4_000,
-          });
+          const review = await runSelfReview(
+            model, diff, state.workspaceContext, token, "coder-self-review",
+          );
 
-          const reviewResp = await callModel(model, reviewMessages, null, token, "coder-self-review");
-
-          if (!reviewResp.toUpperCase().includes("LGTM")) {
+          if (!review.approved) {
             try {
-              const fixResult = await applyCodeToWorkspace(reviewResp, stream);
+              const fixResult = await applyCodeToWorkspace(review.response, stream);
               if (fixResult.written.length > 0) {
                 writtenFiles.push(...fixResult.written);
                 for (const [k, v] of fixResult.oldContents) { allOldContents.set(k, v); }
                 await showBatchDiffs(fixResult.written, fixResult.oldContents);
-                lastResponse = reviewResp;
+                lastResponse = review.response;
                 logger.info("coder", `Self-review: fixed ${fixResult.written.length} file(s)`);
                 // Quick re-validation after self-review fixes
                 qaReport = await runQualityGate(wsRoot, writtenFiles);

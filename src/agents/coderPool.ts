@@ -30,9 +30,16 @@ import {
   runQualityGate,
   formatQualityReportForLLM,
   filterDiagnosticsForFiles,
+  generateDiffReport,
   type QualityGateResult,
   type BuildDiagnostic,
 } from "../utils/qualityGate";
+import {
+  runSelfReview,
+  countDiffLines,
+  SELF_REVIEW_MIN_DIFF_LINES,
+  SELF_REVIEW_MAX_DIFF_LINES,
+} from "./coder";
 import { AgentOutputManager } from "../utils/agentOutputManager";
 import { MultiCoderViewManager, LiveCoderSink } from "../utils/multiCoderView";
 import { showBatchDiffs } from "../utils/diffViewer";
@@ -777,6 +784,12 @@ export async function coderPoolNode(
 
   const parallelMs = Date.now() - startAll;
 
+  // ── Per-domain self-review (gated on diff size + tests passed) ──
+  // Catches logic bugs that pass typecheck/lint but break behavior.
+  // Mutates branchResults entries in place so downstream artifacts
+  // reflect the post-review file list and re-validated test status.
+  await runPoolSelfReviews(branchResults, model, state, stream, token, outputMgr);
+
   // ── 5. Summary ──
   const successCount = branchResults.filter((r) => r.errors.length === 0).length;
   const totalFiles = branchResults.reduce((sum, r) => sum + r.filesWritten.length, 0);
@@ -923,6 +936,117 @@ async function runWithGoWorkers(
     // Fallback to JS execution
     return runWithJSFallback(domains, state, model, stream, token, outputMgr, scaffold);
   }
+}
+
+// ── Per-domain self-review (post-pool, pre-integrator) ──────────────
+//
+// For each branch where tests passed and the diff sits in the
+// "worth-reviewing" band (30–500 +/- lines), fire a single self-review
+// LLM call against just that branch's diff. If the review returns code
+// instead of LGTM, apply the fixes and re-run the quality gate so the
+// integrator sees a consistent state.
+//
+// Reviews run in parallel up to `LLM_CONCURRENCY` to keep wall-clock
+// cost down on multi-domain runs.
+async function runPoolSelfReviews(
+  branchResults: BranchResult[],
+  model: vscode.LanguageModelChat,
+  state: AgentState,
+  stream: vscode.ChatResponseStream,
+  token: vscode.CancellationToken,
+  outputMgr: AgentOutputManager,
+): Promise<void> {
+  if (token.isCancellationRequested) { return; }
+
+  const wsRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  if (!wsRoot) { return; }
+
+  const multiView = MultiCoderViewManager.getInstance();
+
+  // Pre-pass: compute per-branch diff + gate. Logs skips so the user can
+  // see why a branch didn't get reviewed.
+  const eligible: { br: BranchResult; diff: string; lines: number }[] = [];
+  for (const br of branchResults) {
+    if (token.isCancellationRequested) { return; }
+    if (!br.testsPassed || br.errors.length > 0 || br.filesWritten.length === 0) { continue; }
+
+    const diff = await generateDiffReport(wsRoot, br.filesWritten);
+    const lines = countDiffLines(diff);
+    const channelName = `domain:${br.domainId}`;
+
+    if (lines < SELF_REVIEW_MIN_DIFF_LINES) {
+      outputMgr.append(channelName, `🔍 Self-review skipped — diff too small (${lines} lines)`);
+      continue;
+    }
+    if (lines > SELF_REVIEW_MAX_DIFF_LINES) {
+      outputMgr.append(channelName, `🔍 Self-review skipped — diff too large (${lines} lines)`);
+      continue;
+    }
+    eligible.push({ br, diff, lines });
+  }
+
+  if (eligible.length === 0) { return; }
+
+  stream.markdown(
+    `\n> 🔍 Running **${eligible.length} domain self-review(s)** in parallel ` +
+    `(diff between ${SELF_REVIEW_MIN_DIFF_LINES} and ${SELF_REVIEW_MAX_DIFF_LINES} lines)…\n`
+  );
+
+  const sem = new Semaphore(LLM_CONCURRENCY);
+
+  await Promise.all(eligible.map(async ({ br, diff, lines }) => {
+    await sem.acquire();
+    const channelName = `domain:${br.domainId}`;
+    try {
+      if (token.isCancellationRequested) { return; }
+
+      outputMgr.append(channelName, `🔍 Self-reviewing (${lines}-line diff)…`);
+      multiView.appendLog(br.domainId, `🔍 Self-reviewing (${lines}-line diff)…`);
+
+      const review = await runSelfReview(
+        model,
+        diff,
+        state.workspaceContext,
+        token,
+        `coder:${br.domainId}-self-review`,
+      );
+
+      if (review.approved) {
+        outputMgr.append(channelName, `✅ Self-review: LGTM`);
+        multiView.appendLog(br.domainId, `✅ Self-review: LGTM`);
+        return;
+      }
+
+      // Review returned code — apply and re-validate.
+      try {
+        const fixResult = await applyCodeToWorkspace(review.response, stream, { autoApprove: true });
+        if (fixResult.written.length === 0) {
+          outputMgr.append(channelName, `🔍 Self-review flagged issues but produced no parseable fixes`);
+          multiView.appendLog(br.domainId, `🔍 Self-review flagged issues but produced no parseable fixes`);
+          return;
+        }
+
+        br.filesWritten = Array.from(new Set([...br.filesWritten, ...fixResult.written]));
+        await showBatchDiffs(fixResult.written, fixResult.oldContents);
+        outputMgr.append(channelName, `✏️ Self-review applied ${fixResult.written.length} fix(es)`);
+        multiView.appendLog(br.domainId, `✏️ Self-review applied ${fixResult.written.length} fix(es)`);
+
+        const qa = await runQualityGate(wsRoot, br.filesWritten);
+        br.testsPassed = qa.passed;
+        br.testOutput = qa.passed ? "All passed" : formatQualityReportForLLM(qa);
+        outputMgr.append(channelName, qa.passed ? `✅ Post-review tests passed` : `❌ Post-review tests failed`);
+        multiView.setTestResult(br.domainId, qa.passed, br.testOutput);
+      } catch (err: any) {
+        outputMgr.append(channelName, `⚠️ Self-review fix-write failed: ${err?.message ?? String(err)}`);
+        logger.error(`coder:${br.domainId}`, `Self-review fix-write failed: ${err?.message ?? String(err)}`);
+      }
+    } catch (err: any) {
+      outputMgr.append(channelName, `⚠️ Self-review failed: ${err?.message ?? String(err)}`);
+      logger.error(`coder:${br.domainId}`, `Self-review failed: ${err?.message ?? String(err)}`);
+    } finally {
+      sem.release();
+    }
+  }));
 }
 
 // ── JavaScript fallback execution ────────────────────────────────────
