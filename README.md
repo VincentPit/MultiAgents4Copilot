@@ -19,12 +19,12 @@ A **graph-based multi-agent system** that runs inside the VS Code Copilot chat p
 | **Go Worker Parallelism** | Domain coders run as goroutines via a Go child process — true OS-level parallelism, not just `Promise.allSettled` |
 | **Live Per-Coder Panels** | Each parallel domain coder gets its own webview panel with **streaming LLM output**, file-write events, and quality-gate results — watch every coder write code in real time |
 | **Meta-Style Quality Gates** | Every agent runs `build → lint → tests → diff` before marking code complete — like `arc diff` |
-| **Self-Review** | Coders review their own diffs (LLM checks for LGTM) before submitting — catches mistakes before review |
+| **Self-Review** | Coders review their own diffs (LLM checks for LGTM) before submitting — runs both for the lone Coder and per-domain in the pool, gated on 30–500 diff lines so tiny/huge diffs skip the LLM call |
 | **Smart Reviewer Skip** | Standalone Reviewer is automatically skipped when self-review is LGTM, the quality gate is green, and the diff is under 50 lines — saves a duplicate LLM round-trip |
 | **Parallel Domain Coders** | Large tasks fan out to 2–6 independent domain coders, each with their own quality gate (hard cap enforced) |
 | **Full CI Pipeline** | The Integrator (staff engineer) merges all domains and runs `runFullQualityGate` on the whole project |
 | **Scaffold Generation** | Planner produces a project scaffold (directory tree + boilerplate) before domain coders begin coding |
-| **CI-Aware Code Review** | Reviewer sees build/lint/test status badges — CI failures are blocking issues |
+| **CI-Aware Code Review** | Reviewer sees build/lint/test status badges and reads the actual on-disk file contents (not just last_code) — CI failures are blocking issues |
 | **Single-Model (GPT-4.1)** | All agents use GPT-4.1 via the Copilot LM API; falls back to any available Copilot model only if GPT-4.1 itself is unavailable |
 | **Inter-Agent Communication** | Shared message bus — agents post context for each other |
 | **GitHub Repo Search** | Researcher searches GitHub for professional reference repos matching your idea |
@@ -34,7 +34,7 @@ A **graph-based multi-agent system** that runs inside the VS Code Copilot chat p
 | **No Per-Agent Timeouts** | Agents run to completion — only a 30-minute wall-clock guard prevents infinite runs |
 | **Retry + Fallback** | Each model call retries up to 3× with backoff before falling back to any available Copilot model |
 | **Error Recovery** | If an agent crashes, the graph catches it, logs the run, and re-routes through the supervisor |
-| **Security Hardening** | Input validation, prompt-injection guards, output sanitisation, integrity checks |
+| **Security Hardening** | Input validation, prompt-injection guards, output sanitisation, integrity checks, regex secret-scan on every file write (AWS/GitHub/Stripe/JWT/PEM keys) |
 | **Structured Logging** | Full Output Channel with per-agent timing, routing, and fallback events |
 | **Rich Chat UI** | Agent headers, progress indicators, timing breakdowns, summary panels |
 | **Slash Commands** | 6 direct commands for bypassing the supervisor |
@@ -192,7 +192,8 @@ MultiAgentCopilt/
 │       ├── qualityGate.ts        # Build+lint+test+diff CI pipeline
 │       ├── buildValidator.ts     # TypeScript build validation & diagnostics
 │       ├── diffViewer.ts         # Side-by-side diff rendering
-│       ├── fileWriter.ts         # Safe file writing with workspace resolution
+│       ├── fileWriter.ts         # Safe file writing — workspace resolution + secret-scan
+│       ├── secretScan.ts         # Regex secret detection (blocks writes that contain credentials)
 │       ├── goWorkerBridge.ts     # JSON-RPC bridge to Go child process
 │       ├── terminalRunner.ts     # Terminal command execution
 │       ├── logger.ts             # Structured Output Channel logger
